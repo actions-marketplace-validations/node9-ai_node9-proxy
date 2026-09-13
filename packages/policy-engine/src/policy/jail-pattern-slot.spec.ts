@@ -73,24 +73,193 @@ describe('stage 5a — a search pattern is not a path', () => {
   });
 });
 
-// ── 3. Every value-taking flag gets a control row, DERIVED from the table. ───
-// A flag wrongly listed as value-taking swallows the pattern and excuses the
-// FILE. This block is the guard against that, and it grows by itself when a flag
-// is added to the table.
-describe('stage 5a — a value flag must not swallow the pattern', () => {
+// ── 3. The DISCRIMINATING derived guard, over noValue. ──────────────────────
+// A flag that consumes NOTHING leaves the next word as the pattern and the one
+// after it as a FILE, so `VERB FLAG foo <jailed>` must BLOCK. If such a flag is
+// ever moved into `takesValue` by mistake, `foo` is swallowed, the credential
+// becomes the pattern slot and is EXCUSED, and this row goes red.
+//
+// That property is the point. /code-review round 4 proved by mutation that the
+// previous guard (`VERB FLAG v foo <jailed>`, three positionals) blocks under
+// BOTH arity models -- for takesValue, noValue, unknown and even a non-existent
+// flag -- so it described the rule without constraining it: moving grep's `-b`
+// into takesValue kept all four jail specs green while `grep -b foo ~/.ssh/id_rsa`
+// flipped to allow and the real binary printed from the key. This block is red in
+// exactly that case.
+describe('stage 5a — a no-value flag leaves the FILE judged (mutation guard)', () => {
   const rows: Array<[string, string]> = [];
   for (const verb of PATTERN_VERB_NAMES) {
     const shape = patternShapeOf(verb)!;
-    for (const flag of shape.takesValue) {
-      // A pattern flag's operand IS the pattern, and a no-pattern flag means
-      // there is none: both are exercised in block 5, not here.
+    for (const flag of shape.noValue) {
       if (shape.patternFlags.has(flag) || shape.noPatternFlags.has(flag)) continue;
       rows.push([verb, flag]);
     }
   }
-  it('the table yields control rows', () => expect(rows.length).toBeGreaterThan(40));
+  it('the table yields control rows', () => expect(rows.length).toBeGreaterThan(150));
+  it.each(rows)('%s %s foo <jailed> blocks', (verb, flag) => {
+    expect(v(`${verb} ${flag} foo ${K}`)).toBe('block');
+  });
+
+  // And the same shape one word longer, which holds whatever the arity is: the
+  // FILE slot is never excused.
   it.each(rows)('%s %s v foo <jailed> blocks', (verb, flag) => {
     expect(v(`${verb} ${flag} v foo ${K}`)).toBe('block');
+  });
+});
+
+// ── 3b. An INDEPENDENT witness, hand-written on purpose. ────────────────────
+// The derived block above cannot catch a flag MOVED between the two sets,
+// because moving it also moves its test row: mutation-tested 2026-09-13, `-b`
+// relocated from noValue to takesValue, `grep -b foo KEY` flipped to allow, and
+// every derived row stayed green. A test generated from the thing under test is
+// a description, not a constraint.
+//
+// So these rows are typed out, once, from the installed binaries' own --help.
+// They are the flags an engineer actually types, each asserting the property that
+// matters: the flag consumes nothing, so the word after it is the pattern and the
+// credential after THAT is still a FILE. Any of them moved into `takesValue` turns
+// this block red.
+describe('stage 5a — no-value flags, pinned INDEPENDENTLY of the table', () => {
+  const GREP_NO_VALUE = [
+    '-i',
+    '-v',
+    '-n',
+    '-c',
+    '-l',
+    '-L',
+    '-o',
+    '-q',
+    '-s',
+    '-b',
+    '-H',
+    '-h',
+    '-w',
+    '-x',
+    '-r',
+    '-R',
+    '-a',
+    '-I',
+    '-E',
+    '-F',
+    '-G',
+    '-P',
+    '-T',
+    '-z',
+    '-Z',
+    '-U',
+    '--ignore-case',
+    '--invert-match',
+    '--line-number',
+    '--count',
+    '--recursive',
+    '--byte-offset',
+    '--with-filename',
+    '--no-filename',
+    '--word-regexp',
+    '--only-matching',
+    '--quiet',
+    '--text',
+    '--binary',
+    '--color',
+    '--colour',
+    '--extended-regexp',
+    '--fixed-strings',
+    '--perl-regexp',
+    '--line-buffered',
+  ];
+  const RG_NO_VALUE = [
+    '-i',
+    '-v',
+    '-n',
+    '-N',
+    '-c',
+    '-l',
+    '-L',
+    '-o',
+    '-p',
+    '-q',
+    '-s',
+    '-S',
+    '-u',
+    '-U',
+    '-w',
+    '-x',
+    '-z',
+    '-a',
+    '-b',
+    '-F',
+    '-P',
+    '-H',
+    '-h',
+    '-I',
+    '-0',
+    '-.',
+    '--ignore-case',
+    '--invert-match',
+    '--line-number',
+    '--no-line-number',
+    '--count',
+    '--count-matches',
+    '--hidden',
+    '--no-ignore',
+    '--follow',
+    '--multiline',
+    '--pcre2',
+    '--fixed-strings',
+    '--pretty',
+    '--column',
+    '--vimgrep',
+    '--json',
+    '--stats',
+    '--trim',
+    '--sort-files',
+    '--unrestricted',
+    '--search-zip',
+    '--smart-case',
+    '--heading',
+    '--no-heading',
+    '--trace',
+  ];
+
+  it.each(GREP_NO_VALUE)('grep %s foo <jailed> blocks', (flag) => {
+    expect(v(`grep ${flag} foo ${K}`)).toBe('block');
+  });
+  it.each(RG_NO_VALUE)('rg %s foo <jailed> blocks', (flag) => {
+    expect(v(`rg ${flag} foo ${K}`)).toBe('block');
+  });
+
+  // The other half of the same witness: these flags DO consume a word, so the
+  // credential two words later is the FILE and must block, and the flag's own
+  // operand is its argument and must not be mistaken for one.
+  it.each([
+    [`grep -A 3 foo ${K}`],
+    [`grep -m 1 foo ${K}`],
+    [`grep --label x foo ${K}`],
+    [`rg -A 3 foo ${K}`],
+    [`rg --max-count 1 foo ${K}`],
+    [`rg -t ts foo ${K}`],
+  ])('%s blocks', (c) => expect(v(c)).toBe('block'));
+});
+
+// ── 3c. The tables' INVENTORY, so an edit is a conscious act. ───────────────
+// Same idea as CANONICAL_EXTRACTOR_HASH: a change to either set has to be typed
+// here too, which makes a silent relocation impossible to land. Update these
+// numbers only together with a measurement on the real binary.
+describe('stage 5a — the flag tables are pinned by size', () => {
+  it.each([
+    ['grep', 22, 62],
+    ['rg', 49, 101],
+  ])('%s: %i value flags, %i no-value flags', (verb, takes, none) => {
+    const shape = patternShapeOf(verb)!;
+    expect({ takes: shape.takesValue.size, none: shape.noValue.size }).toEqual({ takes, none });
+  });
+
+  it('the two sets never overlap', () => {
+    for (const verb of PATTERN_VERB_NAMES) {
+      const shape = patternShapeOf(verb)!;
+      for (const f of shape.takesValue)
+        expect(shape.noValue.has(f), `${verb} ${f} is in BOTH sets`).toBe(false);
+    }
   });
 });
 
@@ -232,6 +401,24 @@ describe("stage 5a — a value flag's operand: file or argument", () => {
 });
 
 // ── 6d. /code-review round 3: four more BLOCK -> ALLOW shapes. ──────────────
+describe('stage 5a — `--` ends the options', () => {
+  // After `--` the next word is the PATTERN whatever it looks like, and the rest
+  // are FILES. `positionedArgs` does not honour it, so a dash-looking pattern
+  // occupied no slot and the credential slid into slot 0: `grep -v -- -zzzz KEY`
+  // printed the whole key and read allow (/code-review round 4).
+  it.each([
+    [`grep -v -- -zzzz ${K}`, 'block'],
+    [`grep -rv -- -zzzz ${D}`, 'block'],
+    [`rg -v -- -zzzz ${K}`, 'block'],
+    [`egrep -v -- -zzzz ${K}`, 'block'],
+    [`sudo grep -v -- -zzzz ${K}`, 'block'],
+    [`grep -- -f ${K}`, 'block'],
+    // the ordinary use of `--`, which must still be excused
+    [`grep -- .env f.txt`, 'null'],
+    [`grep -rn -- .env docs/`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
 describe('stage 5a — a lone dash is not a flag', () => {
   // `positionedArgs` calls `-` a flag; every one of these tools takes it as the
   // PATTERN, so the word after it is a FILE. Measured: `grep - KEY` printed the

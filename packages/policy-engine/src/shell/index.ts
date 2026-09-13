@@ -564,37 +564,45 @@ interface PatternShape {
   noPatternFlags: Set<string>;
 }
 
-// GNU grep 3.11: every long option swept (/code-review round 2), every short
-// option from its own --help. `--binary` is listed because its ABSENCE let
-// `--binary` prefix-resolve to `--binary-files`, skip a word, and excuse a
-// credential -- an exact option name must never resolve as an abbreviation of a
-// longer one. `--group-separator` is in NEITHER set on purpose: GNU consumes a
-// word and ugrep 7.8.4 does not, so it stays unknown, and unknown excuses
-// nothing.
+// ⭐ BOTH TABLES ARE EXTRACTED FROM THE INSTALLED BINARIES, not from memory:
+// `/usr/bin/grep --help` (GNU grep 3.11) and `rg --help` (ripgrep 14.1.1), with a
+// value-taking flag identified by its `=VALUE` in the help text and then
+// behaviourally re-measured one at a time (`echo hay | VERB FLAG 2 nosuchfile`:
+// if the flag consumed `2` the pattern is `nosuchfile` and grep reads stdin, and
+// if it consumed nothing then `2` is the pattern and `nosuchfile` is a FILE).
+//
+// A flag with an OPTIONAL argument -- help text `--color[=WHEN]` -- consumes
+// NOTHING in separated form, because GNU getopt_long never takes a separate word
+// for one. That is measured, not assumed: `grep --color never foo` exits 2 with
+// "foo: No such file or directory".
+//
+// `--group-separator` is in NEITHER set on purpose: GNU grep 3.11 consumes a word
+// and ugrep 7.8.4 does not, and the engine cannot know which `grep` will run. It
+// therefore stays UNKNOWN, which costs a false positive and never a read.
 const GREP_SHAPE: PatternShape = {
   takesValue: new Set([
     '-A',
     '-B',
     '-C',
-    '-m',
-    '-d',
     '-D',
+    '-d',
     '-e',
     '-f',
+    '-m',
     '--after-context',
     '--before-context',
-    '--context',
-    '--max-count',
-    '--directories',
-    '--devices',
-    '--label',
     '--binary-files',
-    '--include',
+    '--context',
+    '--devices',
+    '--directories',
     '--exclude',
-    '--exclude-from',
     '--exclude-dir',
-    '--regexp',
+    '--exclude-from',
     '--file',
+    '--include',
+    '--label',
+    '--max-count',
+    '--regexp',
   ]),
   noValue: new Set([
     '-E',
@@ -626,40 +634,39 @@ const GREP_SHAPE: PatternShape = {
     '-u',
     '-I',
     '-a',
-    '--extended-regexp',
-    '--fixed-strings',
     '--basic-regexp',
-    '--perl-regexp',
-    '--ignore-case',
-    '--no-ignore-case',
-    '--invert-match',
-    '--word-regexp',
-    '--line-regexp',
-    '--count',
-    '--files-with-matches',
-    '--files-without-match',
-    '--only-matching',
-    '--quiet',
-    '--silent',
-    '--no-messages',
-    '--byte-offset',
-    '--with-filename',
-    '--no-filename',
-    '--line-number',
-    '--initial-tab',
-    '--null',
-    '--null-data',
-    '--recursive',
-    '--dereference-recursive',
     '--binary',
-    '--unix-byte-offsets',
-    '--text',
-    '--line-buffered',
+    '--byte-offset',
     '--color',
     '--colour',
-    '--no-group-separator',
+    '--count',
+    '--dereference-recursive',
+    '--extended-regexp',
+    '--files-with-matches',
+    '--files-without-match',
+    '--fixed-strings',
     '--help',
+    '--ignore-case',
+    '--initial-tab',
+    '--invert-match',
+    '--line-buffered',
+    '--line-number',
+    '--line-regexp',
+    '--no-filename',
+    '--no-group-separator',
+    '--no-ignore-case',
+    '--no-messages',
+    '--null',
+    '--null-data',
+    '--only-matching',
+    '--perl-regexp',
+    '--quiet',
+    '--recursive',
+    '--silent',
+    '--text',
     '--version',
+    '--with-filename',
+    '--word-regexp',
   ]),
   patternFlags: new Set(['-e', '--regexp']),
   noPatternFlags: new Set(['-f', '--file']),
@@ -670,8 +677,10 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
   // `grep -E` and `grep -F`. Read in full, not assumed.
   egrep: GREP_SHAPE,
   fgrep: GREP_SHAPE,
-  // ripgrep 14.1.1, from its own long --help. `--pcre2` is in noValue so it
-  // cannot prefix-resolve to `--pcre2-version` and suppress the excuse.
+  // ripgrep 14.1.1, complete from its own --help. An earlier comment here said rg
+  // was not installed on the measuring machine; it is, and that stale claim is why
+  // this table shipped incomplete for two rounds, blocking ordinary searches like
+  // `rg --sort-files .env src` (/code-review round 4).
   rg: {
     takesValue: new Set([
       '-A',
@@ -690,29 +699,31 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '-T',
       '--after-context',
       '--before-context',
-      '--context',
-      '--context-separator',
       '--color',
       '--colors',
+      '--context',
+      '--context-separator',
       '--dfa-size-limit',
-      '--regex-size-limit',
-      '--max-filesize',
       '--encoding',
       '--engine',
       '--field-context-separator',
       '--field-match-separator',
-      '--glob',
-      '--iglob',
-      '--ignore-file',
+      '--file',
       '--generate',
+      '--glob',
       '--hostname-bin',
       '--hyperlink-format',
+      '--iglob',
+      '--ignore-file',
       '--max-columns',
       '--max-count',
       '--max-depth',
+      '--max-filesize',
       '--path-separator',
       '--pre',
       '--pre-glob',
+      '--regexp',
+      '--regex-size-limit',
       '--replace',
       '--sort',
       '--sortr',
@@ -721,109 +732,109 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '--type-add',
       '--type-clear',
       '--type-not',
-      '--regexp',
-      '--file',
     ]),
     noValue: new Set([
-      '-i',
-      '-s',
-      '-S',
-      '-v',
-      '-w',
-      '-x',
+      '-.',
+      '-0',
+      '-a',
+      '-b',
       '-c',
+      '-F',
+      '-h',
+      '-H',
+      '-i',
+      '-I',
       '-l',
       '-L',
       '-n',
       '-N',
       '-o',
       '-p',
+      '-P',
       '-q',
+      '-s',
+      '-S',
       '-u',
       '-U',
-      '-F',
-      '-P',
-      '-z',
-      '-a',
-      '-h',
+      '-v',
       '-V',
-      '-b',
-      '-I',
-      '--ignore-case',
-      '--case-sensitive',
-      '--smart-case',
-      '--invert-match',
-      '--word-regexp',
-      '--line-regexp',
-      '--count',
-      '--count-matches',
-      '--files-with-matches',
-      '--files-without-match',
-      '--only-matching',
-      '--quiet',
-      '--line-number',
-      '--no-line-number',
-      '--with-filename',
-      '--no-filename',
-      '--heading',
-      '--no-heading',
-      '--hidden',
-      '--no-ignore',
-      '--no-ignore-vcs',
-      '--follow',
-      '--multiline',
-      '--multiline-dotall',
-      '--pcre2',
-      '--no-pcre2',
-      '--fixed-strings',
-      '--text',
-      '--byte-offset',
-      '--json',
-      '--stats',
-      '--passthru',
-      '--trim',
-      '--vimgrep',
-      '--null',
-      '--null-data',
-      '--crlf',
-      '--debug',
-      '--no-config',
-      '--one-file-system',
+      '-w',
+      '-x',
+      '-z',
+      '--auto-hybrid-regex',
       '--binary',
       '--block-buffered',
-      '--line-buffered',
-      '--no-unicode',
-      '--auto-hybrid-regex',
-      // Named by /code-review round 3: real ripgrep options that were in NEITHER
-      // set, so an ordinary typed search read as UNKNOWN and kept its false
-      // positive (`rg --pretty .env src/`, `rg --column ".env" src/`). All are
-      // no-value switches per ripgrep 14.1.1's own --help, whose value-taking
-      // options were swept exhaustively when takesValue above was built.
-      '--pretty',
+      '--byte-offset',
+      '--case-sensitive',
       '--column',
-      '--no-column',
-      '--unrestricted',
-      '--search-zip',
-      '--include-zero',
-      '--require-git',
-      '--no-require-git',
-      '--mmap',
-      '--no-mmap',
-      '--no-follow',
-      '--no-hidden',
-      '--no-multiline',
-      '--no-crlf',
-      '--no-trim',
-      '--no-messages',
-      '--no-ignore-parent',
-      '--no-ignore-dot',
-      '--no-ignore-global',
-      '--no-ignore-files',
-      '--stop-on-nonmatch',
+      '--count',
+      '--count-matches',
+      '--crlf',
+      '--debug',
+      '--files',
+      '--files-with-matches',
+      '--files-without-match',
+      '--fixed-strings',
+      '--follow',
       '--glob-case-insensitive',
-      '--no-glob-case-insensitive',
+      '--heading',
       '--help',
+      '--hidden',
+      '--ignore-case',
+      '--ignore-file-case-insensitive',
+      '--include-zero',
+      '--invert-match',
+      '--json',
+      '--line-buffered',
+      '--line-number',
+      '--line-regexp',
+      '--max-columns-preview',
+      '--mmap',
+      '--multiline',
+      '--multiline-dotall',
+      '--no-column',
+      '--no-config',
+      '--no-context-separator',
+      '--no-encoding',
+      '--no-filename',
+      '--no-ignore',
+      '--no-ignore-dot',
+      '--no-ignore-exclude',
+      '--no-ignore-files',
+      '--no-ignore-global',
+      '--no-ignore-messages',
+      '--no-ignore-parent',
+      '--no-ignore-vcs',
+      '--no-line-number',
+      '--no-messages',
+      '--no-pcre2-unicode',
+      '--no-pre',
+      '--no-require-git',
+      '--no-unicode',
+      '--null',
+      '--null-data',
+      '--one-file-system',
+      '--only-matching',
+      '--passthru',
+      '--pcre2',
+      '--pcre2-version',
+      '--pretty',
+      '--print0',
+      '--quiet',
+      '--search-zip',
+      '--smart-case',
+      '--sort-files',
+      '--stats',
+      '--stop-on-nonmatch',
+      '--text',
+      '--trace',
+      '--trim',
+      '--type-list',
+      '--unrestricted',
       '--version',
+      '--vimgrep',
+      '--with-filename',
+      '--word-regexp',
     ]),
     patternFlags: new Set(['-e', '--regexp']),
     // `--files` and `--type-list` list or enumerate without a pattern. Founder
@@ -832,6 +843,7 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
     noPatternFlags: new Set(['-f', '--file', '--files', '--type-list', '--pcre2-version']),
   },
 };
+
 /** Exported so the spec DERIVES its control rows from the table rather than
  *  hand-writing them: a flag added here gains a row for free. */
 export const PATTERN_VERB_NAMES = Object.keys(PATTERN_VERBS);
@@ -2913,6 +2925,9 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
   // and read ALLOW (/code-review round 3). UNKNOWN is the honest answer, and it
   // excuses nothing.
   if (/^-+$/.test(token)) return UNKNOWN;
+  // `-NUM` is one token equal to `--context=NUM` and consumes nothing. Without
+  // this it read as UNKNOWN and `grep -5 .env notes.md` kept its false positive.
+  if (/^-\d+$/.test(token)) return NONE;
   if (token.startsWith('--')) {
     if (token.includes('=')) {
       // It carries its own value, so it consumes no following word -- but only
@@ -2997,7 +3012,17 @@ function readTargets(
   // slot is the pattern, and we excuse nothing. A dynamic word AFTER the pattern
   // (`grep .env "$FILE"`) is harmless and still excuses.
   const firstDynamic = words.findIndex((w, i) => i >= from && w === null);
-  if (!patternElsewhere) {
+  // `--` ends the options, so the very next word is the PATTERN whatever it looks
+  // like, and everything after it is a FILE. `positionedArgs` does not honour it
+  // (a dash-looking word is a flag to it), so `grep -v -- -zzzz KEY` gave the
+  // credential slot 0 and excused it -- measured, the whole key printed
+  // (/code-review round 4). When that pattern word is dash-looking it is not in
+  // `args` at all, and then nothing is excused.
+  const endOfOptions = words.findIndex((w, i) => i >= from && w === '--');
+  if (!patternElsewhere && endOfOptions >= 0) {
+    const a = args.find((x) => x.argv === endOfOptions + 1);
+    if (a) excused.add(a);
+  } else if (!patternElsewhere) {
     for (const a of args) {
       if (firstDynamic >= 0 && a.argv > firstDynamic) break;
       if (a.afterFlag === null) {

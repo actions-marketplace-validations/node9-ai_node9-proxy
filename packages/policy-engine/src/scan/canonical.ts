@@ -457,6 +457,21 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Plus three false positives: 23 real ripgrep switches were in neither set, a
 // `-tconfig` attached operand was read as a bundle containing `-f`, and
 // `rg --pcre2` resolved to `--pcre2-version`.
+// /code-review round 4 found one more bypass, one more false-positive class, and
+// a defect in the TEST rather than the code:
+//   - `--` ends the options, so the next word is the pattern whatever it looks
+//     like. positionedArgs does not honour it, so `grep -v -- -zzzz KEY` gave the
+//     credential slot 0 and printed the whole key.
+//   - both flag tables are now EXTRACTED from the installed binaries
+//     (`/usr/bin/grep --help`, `rg --help`) rather than written from memory. 41
+//     real ripgrep switches had been in neither set, so ordinary searches like
+//     `rg --sort-files .env src` still blocked. An earlier comment claiming rg was
+//     not installed is why that table shipped incomplete for two rounds.
+//   - the DERIVED spec rows could not catch a flag MOVED between the two sets,
+//     because moving it moves its own test row: mutation-proved by relocating
+//     grep's `-b`, which flipped `grep -b foo KEY` to allow with every jail spec
+//     still green. The guard is now an independently typed list plus a pinned
+//     inventory, and the same mutation now fails two blocks.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -481,7 +496,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'a385b181b2567191';
+export const CANONICAL_EXTRACTOR_HASH = '3aa89e1f63cb76ed';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
