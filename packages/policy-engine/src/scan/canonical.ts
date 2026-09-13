@@ -438,6 +438,25 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //   - a value flag's operand is its ARGUMENT and reads nothing, so it is excused,
 //     except for the flags whose operand IS a file (FILE_OPERAND_FLAGS). Without
 //     that, the headline false positive was fixed in only one of its spellings.
+// /code-review round 3 found eight more, four of them bypasses, and two were
+// shapes no flag table could have covered:
+//   - a lone `-` is not a flag. Every one of these tools takes it as the PATTERN,
+//     so `grep - KEY` printed the key while the engine excused it as the pattern
+//     slot. It is UNKNOWN now, and unknown excuses nothing.
+//   - a DYNAMIC pattern word (`grep "$PAT" KEY`) occupies no slot, so the FILE
+//     slid into slot 0 and was excused. Once a dynamic word appears ahead of a
+//     candidate, nothing is excused: the pattern may BE that word.
+//   - an `=` token consumes no following word, but only if we RECOGNISE the flag.
+//     `grep --config=KEY` opens the key on ugrep, and `--include-from=` /
+//     `--ignore-files=` have no separated spelling to fall back on. An unknown
+//     `=` value is now judged, scoped to the verbs whose option table we have so
+//     that `sort --output=KEY` (a WRITE, the CI key-install case) stays alone.
+//   - ripgrep's `-g/--glob/--iglob` decide which files it SEARCHES, so a glob
+//     naming a credential makes rg open it. They join grep's `--include` in the
+//     file-operand table, and the derived spec split moved with them.
+// Plus three false positives: 23 real ripgrep switches were in neither set, a
+// `-tconfig` attached operand was read as a bundle containing `-f`, and
+// `rg --pcre2` resolved to `--pcre2-version`.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -462,7 +481,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'b54cc5e43d241cff';
+export const CANONICAL_EXTRACTOR_HASH = 'a385b181b2567191';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

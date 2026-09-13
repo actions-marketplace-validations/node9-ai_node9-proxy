@@ -231,6 +231,83 @@ describe("stage 5a — a value flag's operand: file or argument", () => {
   });
 });
 
+// ── 6d. /code-review round 3: four more BLOCK -> ALLOW shapes. ──────────────
+describe('stage 5a — a lone dash is not a flag', () => {
+  // `positionedArgs` calls `-` a flag; every one of these tools takes it as the
+  // PATTERN, so the word after it is a FILE. Measured: `grep - KEY` printed the
+  // key. UNKNOWN is the honest state, and it excuses nothing.
+  it.each([
+    [`grep - ${K}`],
+    [`rg - ${K}`],
+    [`egrep - ${K}`],
+    [`sudo grep - ${K}`],
+    [`grep -H - ${K}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+});
+
+describe('stage 5a — a DYNAMIC pattern hides which slot is the pattern', () => {
+  // A dynamic word occupies no slot (stage 3), so the FILE became the first
+  // positional and was excused. The pattern may BE the dynamic word, so once one
+  // appears ahead of a candidate nothing is excused.
+  it.each([
+    [`grep "$PAT" ${K}`],
+    [`grep "$(cat patterns.txt)" ${K}`],
+    [`rg "$PAT" ${K}`],
+    [`sudo grep "$P" ${K}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('a dynamic word AFTER the pattern is harmless and still excuses', () => {
+    expect(v(`grep .env "$FILE"`)).toBe('null');
+    expect(v(`grep -n .env "$FILE"`)).toBe('null');
+  });
+});
+
+describe('stage 5a — an UNKNOWN `=` flag is not a free pass', () => {
+  // An `=` token carries its own value, so it consumes nothing -- but only if we
+  // recognise it. `grep --config=KEY` opens the key on ugrep and echoes its first
+  // line back in an error; `--include-from=` and `--ignore-files=` have no
+  // separated spelling to fall back on.
+  it.each([
+    [`grep --config=${K} needle`],
+    [`grep --include-from=${K} needle n.txt`],
+    [`grep --ignore-files=${K} needle n.txt`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('a RECOGNISED `=` flag stays quiet', () => {
+    expect(v(`grep --color=always ${E} f.txt`)).toBe('null');
+    expect(v(`grep --label=${E} foo f.txt`)).toBe('null');
+    expect(v(`grep --exclude=${E} -r x .`)).toBe('null');
+    // A verb with no option table keeps its old behaviour, which is what leaves
+    // `sort --output=KEY` -- a WRITE, the CI key-install case -- alone.
+    expect(v(`sort --output=${K} /tmp/newkey`)).toBe('null');
+  });
+});
+
+describe("stage 5a — ripgrep's glob flags name files it OPENS", () => {
+  // `-g/--glob/--iglob` decide which files rg SEARCHES, so an operand naming a
+  // credential makes rg read it, exactly like grep's --include. Measured:
+  // `rg --hidden -g .env AWS tree` printed the file's contents.
+  it.each([[`rg --hidden -g .env AWS tree`], [`rg --glob ${E} AWS tree`], [`rg -g ${K} AWS .`]])(
+    '%s',
+    (c) => expect(v(c)).toBe('block')
+  );
+
+  it('and an ordinary glob is still excused', () => {
+    expect(v(`rg -g "*.ts" .env src/`)).toBe('null');
+  });
+});
+
+describe('stage 5a — an attached operand is not a bundle of flags', () => {
+  // `-tconfig` is `-t config`, not a bundle containing `-f`. Reading every letter
+  // found the `f` in `config` and blocked an ordinary typed search.
+  it.each([
+    [`rg -tconfig .env src/`],
+    [`rg -treact .env src/`],
+    [`rg -tvue .env src/`],
+    [`rg -t config .env src/`],
+  ])('%s', (c) => expect(v(c)).toBe('null'));
+});
+
 // ── 7. Reached through a wrapper: the same table. ────────────────────────────
 describe('stage 5a — the wrapped read sees the same slots', () => {
   it.each([

@@ -481,9 +481,10 @@ export const FS_READ_TOOLS = new Set([
 //
 // Every entry was earned under `strace -e openat` against a decoy file
 // (2026-09-13), because a row is only a bypass if the command ACTUALLY OPENS the
-// file. Two candidates were refuted that way and are pinned as allow in
-// jail-flag-operand.spec.ts: `awk --file=` (mawk rejects the spelling) and
-// `tail --follow=` (invalid argument).
+// file. `tail --follow=KEY` was refuted that way and is pinned as ALLOW in
+// jail-flag-operand.spec.ts: GNU tail takes name|descriptor and opens nothing.
+// `awk --file=KEY` is PLATFORM-DEPENDENT -- mawk rejects the spelling, gawk
+// documents and opens it -- so it is judged rather than assumed away.
 //
 // ⚠️ Deliberately NOT "judge every `=` value". Measured, that reading blocks
 // `grep --exclude=.env` (a search that EXCLUDES the file reads nothing),
@@ -793,6 +794,34 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '--line-buffered',
       '--no-unicode',
       '--auto-hybrid-regex',
+      // Named by /code-review round 3: real ripgrep options that were in NEITHER
+      // set, so an ordinary typed search read as UNKNOWN and kept its false
+      // positive (`rg --pretty .env src/`, `rg --column ".env" src/`). All are
+      // no-value switches per ripgrep 14.1.1's own --help, whose value-taking
+      // options were swept exhaustively when takesValue above was built.
+      '--pretty',
+      '--column',
+      '--no-column',
+      '--unrestricted',
+      '--search-zip',
+      '--include-zero',
+      '--require-git',
+      '--no-require-git',
+      '--mmap',
+      '--no-mmap',
+      '--no-follow',
+      '--no-hidden',
+      '--no-multiline',
+      '--no-crlf',
+      '--no-trim',
+      '--no-messages',
+      '--no-ignore-parent',
+      '--no-ignore-dot',
+      '--no-ignore-global',
+      '--no-ignore-files',
+      '--stop-on-nonmatch',
+      '--glob-case-insensitive',
+      '--no-glob-case-insensitive',
       '--help',
       '--version',
     ]),
@@ -825,7 +854,11 @@ const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
   // rg and gawk are NOT installed on the measuring machine: these two rows are
   // from the shipped documentation (ripgrep `-f/--file`, `--ignore-file`; gawk
   // `-f/--file`) and are marked as such in the spec.
-  rg: new Set(['-f', '--file', '--ignore-file']),
+  // `-g/--glob/--iglob` name which files ripgrep SEARCHES, so an operand naming
+  // a credential makes rg open it -- the same reason grep's `--include` is here.
+  // Measured (/code-review round 3): `rg --hidden -g .env AWS tree` opened .env
+  // and printed its contents.
+  rg: new Set(['-f', '--file', '--ignore-file', '-g', '--glob', '--iglob']),
   sed: new Set(['-f', '--file']),
   awk: new Set(['-f', '--file']),
   gawk: new Set(['-f', '--file']),
@@ -2443,7 +2476,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
       // wrapper, or as find's -exec action.
       const readPaths = FS_READ_TOOLS.has(name)
-        ? [...readTargets(name, args, flags), ...flagOperandFiles(name, words, 1)]
+        ? [...readTargets(name, args, flags, words, 1), ...flagOperandFiles(name, words, 1)]
         : wrappedReadPaths(words, name);
       if (readPaths) {
         for (const p of readPaths) {
@@ -2831,16 +2864,28 @@ function knownLongFlags(verb: string): Set<string> {
   return out;
 }
 
-/** The flag NAMES a token carries: `--file=x` -> ['--file'], `-rnf` -> ['-r','-n','-f']. */
-function flagNamesOf(token: string): string[] {
+/**
+ * The flag NAMES a token carries: `--file=x` -> ['--file'], `-rnf` -> ['-r','-n','-f'].
+ *
+ * A short bundle stops at the FIRST argument-taking letter, because that letter
+ * swallows the rest of the token: `-tconfig` is `-t config`, not a bundle
+ * containing `-f`. Scanning every letter instead read the `f` in `config` as
+ * grep's pattern-FILE flag and blocked `rg -tconfig .env src/`, an ordinary typed
+ * search (/code-review round 3). `shape` is optional so the caller that has no
+ * verb shape still gets the whole-token split.
+ */
+function flagNamesOf(token: string, shape?: PatternShape): string[] {
   if (token.startsWith('--')) {
     const eq = token.indexOf('=');
     return [eq > 0 ? token.slice(0, eq) : token];
   }
-  return token
-    .slice(1)
-    .split('')
-    .map((c) => `-${c}`);
+  const out: string[] = [];
+  for (const c of token.slice(1)) {
+    const name = `-${c}`;
+    out.push(name);
+    if (shape?.takesValue.has(name)) break;
+  }
+  return out;
 }
 
 /**
@@ -2862,8 +2907,26 @@ const UNKNOWN: FlagEffect = { kind: 'unknown' };
 
 function flagEffect(token: string, shape: PatternShape, known: Set<string>): FlagEffect {
   if (token === '--') return NONE;
+  // A lone `-` is not a flag at all. Every one of these tools takes it as the
+  // PATTERN (or as stdin), so the word after it is a FILE. Treating it as a
+  // no-value flag excused the credential: `grep - ~/.ssh/id_rsa` printed the key
+  // and read ALLOW (/code-review round 3). UNKNOWN is the honest answer, and it
+  // excuses nothing.
+  if (/^-+$/.test(token)) return UNKNOWN;
   if (token.startsWith('--')) {
-    if (token.includes('=')) return NONE; // carries its own value
+    if (token.includes('=')) {
+      // It carries its own value, so it consumes no following word -- but only
+      // if we RECOGNISE it. An unknown `=` flag may be anything, including a
+      // value-taking flag whose separated spelling we would have caught:
+      // `grep --config=KEY` opens the key on ugrep (/code-review round 3).
+      const eqName = token.slice(0, token.indexOf('='));
+      const recognised =
+        namesFlag(eqName, shape.takesValue, known) ||
+        namesFlag(eqName, shape.noValue, known) ||
+        namesFlag(eqName, shape.patternFlags, known) ||
+        namesFlag(eqName, shape.noPatternFlags, known);
+      return recognised ? NONE : UNKNOWN;
+    }
     const takes = namesFlag(token, shape.takesValue, known);
     const none = namesFlag(token, shape.noValue, known);
     // An abbreviation that could be either is unknown, not a coin toss.
@@ -2897,11 +2960,17 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
  * nothing is excused except that flag's own operand. When any flag in the
  * command is UNKNOWN to the table, nothing is excused at all.
  */
-function readTargets(verb: string, args: PositionedArg[], flags: string[]): string[] {
+function readTargets(
+  verb: string,
+  args: PositionedArg[],
+  flags: string[],
+  words: (string | null)[] = [],
+  from = 1
+): string[] {
   const shape = PATTERN_VERBS[verb];
   if (!shape) return args.map((a) => a.value);
   const known = knownLongFlags(verb);
-  const names = flags.flatMap(flagNamesOf);
+  const names = flags.flatMap((f) => flagNamesOf(f, shape));
   const patternElsewhere = names.some(
     (n) => namesFlag(n, shape.patternFlags, known) || namesFlag(n, shape.noPatternFlags, known)
   );
@@ -2921,8 +2990,16 @@ function readTargets(verb: string, args: PositionedArg[], flags: string[]): stri
     if (fileFlags && namesFlag(e.flag, fileFlags, known)) continue; // a FILE: judge it
     excused.add(a);
   }
+  // A DYNAMIC word (`grep "$PAT" KEY`) occupies no slot, so without this the
+  // FILE became the first positional and was excused as the pattern -- measured
+  // ALLOW, block before this stage (/code-review round 3). The pattern may BE the
+  // dynamic word, so once one appears ahead of a candidate we cannot say which
+  // slot is the pattern, and we excuse nothing. A dynamic word AFTER the pattern
+  // (`grep .env "$FILE"`) is harmless and still excuses.
+  const firstDynamic = words.findIndex((w, i) => i >= from && w === null);
   if (!patternElsewhere) {
     for (const a of args) {
+      if (firstDynamic >= 0 && a.argv > firstDynamic) break;
       if (a.afterFlag === null) {
         excused.add(a);
         break;
@@ -2952,9 +3029,28 @@ function flagOperandFiles(verb: string, words: (string | null)[], from: number):
       // `--file=KEY`, and its getopt_long abbreviations (`--fil=KEY`).
       const eq = w.indexOf('=');
       if (eq <= 0) continue;
-      if (!namesFlag(w.slice(0, eq), flags, known)) continue;
+      const name = w.slice(0, eq);
       const value = w.slice(eq + 1);
-      if (value) out.push(value);
+      if (!value) continue;
+      if (namesFlag(name, flags, known)) {
+        out.push(value);
+        continue;
+      }
+      // An UNKNOWN `=` flag on a verb whose option table we actually have: judge
+      // the value. `grep --config=KEY` opens the key on ugrep and echoes its
+      // first line back in an error (/code-review round 3), and the same shape
+      // hides `--include-from=` and `--ignore-files=`, which have no separated
+      // spelling to fall back on. Scoped to PATTERN_VERBS on purpose: for a verb
+      // with no table everything is unknown, and judging there would block
+      // `sort --output=KEY`, a WRITE and the legitimate CI key-install case.
+      const shape = PATTERN_VERBS[verb];
+      if (!shape) continue;
+      const recognised =
+        namesFlag(name, shape.takesValue, known) ||
+        namesFlag(name, shape.noValue, known) ||
+        namesFlag(name, shape.patternFlags, known) ||
+        namesFlag(name, shape.noPatternFlags, known);
+      if (!recognised) out.push(value);
       continue;
     }
     // ATTACHED short operand: `grep -fKEY`, `grep -nfKEY`, `sed -fKEY`. The
@@ -3011,7 +3107,7 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
   const rest = words.slice(h + 1);
   const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
   return [
-    ...readTargets(head, positionedArgs(words, h + 1), restFlags),
+    ...readTargets(head, positionedArgs(words, h + 1), restFlags, words, h + 1),
     ...flagOperandFiles(head, words, h + 1),
   ];
 }
