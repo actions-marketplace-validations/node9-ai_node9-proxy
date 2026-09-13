@@ -494,6 +494,21 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //     grep's `-b`, which flipped `grep -b foo KEY` to allow with every jail spec
 //     still green. The guard is now an independently typed list plus a pinned
 //     inventory, and the same mutation now fails two blocks.
+// /code-review round 5 found two bypasses and a second mutation escape:
+//   - the `--` fix from round 4 excused the word after `--` unconditionally, so
+//     `grep TODO -- KEY` -- pattern already given, `--` then naming a FILE --
+//     excused the credential and printed the key. The slot walk now resolves the
+//     pattern POSITION the way the tool's own parser does, left to right, and that
+//     one walk replaces every special case (dynamic word, `--`, value flag,
+//     unknown flag).
+//   - the copy tier's in-jail DESTINATION guard was keyed on the destination
+//     alone, so `cp ~/.ssh/id_rsa /tmp/.ssh/k` produced no finding: `/tmp/.ssh/`
+//     matches the same rule the real jail does. The SOURCE decides now -- no
+//     jailed source is an install, the same directory is a rename, anywhere else
+//     is the credential leaving.
+//   - the size-based table pin missed a SAME-SIZE swap (`--label` and
+//     `--initial-tab` traded sets, 1887 tests green, `grep --initial-tab pat KEY`
+//     flipped to allow). The pin now hashes the sorted CONTENTS of both sets.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -518,7 +533,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '4fb92728ce75bf3c';
+export const CANONICAL_EXTRACTOR_HASH = '7f436ddb98b7618d';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

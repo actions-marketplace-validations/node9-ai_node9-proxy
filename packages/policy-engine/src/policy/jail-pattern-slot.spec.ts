@@ -241,17 +241,32 @@ describe('stage 5a — no-value flags, pinned INDEPENDENTLY of the table', () =>
   ])('%s blocks', (c) => expect(v(c)).toBe('block'));
 });
 
-// ── 3c. The tables' INVENTORY, so an edit is a conscious act. ───────────────
-// Same idea as CANONICAL_EXTRACTOR_HASH: a change to either set has to be typed
-// here too, which makes a silent relocation impossible to land. Update these
-// numbers only together with a measurement on the real binary.
-describe('stage 5a — the flag tables are pinned by size', () => {
+// ── 3c. The tables' CONTENT, so an edit is a conscious act. ─────────────────
+// Same idea as CANONICAL_EXTRACTOR_HASH: a change to either set must be typed
+// here too, so a silent relocation cannot land.
+//
+// Sizes alone are not enough, mutation-proved twice. /code-review round 4 moved
+// `-b` out of noValue (caught by size). Round 5 SWAPPED `--label` into noValue and
+// `--initial-tab` into takesValue, which leaves both sizes identical: 1887 tests
+// stayed green while `grep --initial-tab pat ~/.ssh/id_rsa` flipped to allow, and
+// the real `-T` takes no argument. So the pin hashes the sorted CONTENTS.
+describe('stage 5a — the flag tables are pinned by content', () => {
+  const digest = (set: Set<string>): string => {
+    let h = 0;
+    for (const f of [...set].sort()) for (const ch of f) h = (h * 31 + ch.charCodeAt(0)) | 0;
+    return `${set.size}:${(h >>> 0).toString(16)}`;
+  };
+
+  // Update these ONLY together with a measurement on the real binary, and say in
+  // the commit which flag moved and what the binary did.
   it.each([
-    ['grep', 22, 62],
-    ['rg', 49, 101],
-  ])('%s: %i value flags, %i no-value flags', (verb, takes, none) => {
+    ['grep', 'takesValue', '22:d09f79f5'],
+    ['grep', 'noValue', '62:d48d145d'],
+    ['rg', 'takesValue', '49:1a1722dc'],
+    ['rg', 'noValue', '141:c0ef2654'],
+  ])('%s %s', (verb, which, want) => {
     const shape = patternShapeOf(verb)!;
-    expect({ takes: shape.takesValue.size, none: shape.noValue.size }).toEqual({ takes, none });
+    expect(digest(which === 'takesValue' ? shape.takesValue : shape.noValue)).toBe(want);
   });
 
   it('the two sets never overlap', () => {
@@ -417,6 +432,38 @@ describe('stage 5a — `--` ends the options', () => {
     [`grep -- .env f.txt`, 'null'],
     [`grep -rn -- .env docs/`, 'null'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+describe('stage 5a — `--` after the pattern names a FILE', () => {
+  // /code-review round 5. The first `--` fix excused the word after `--`
+  // unconditionally, so when the pattern was ALREADY given as an earlier
+  // positional the excused word was the file: `grep TODO -- KEY` printed the key.
+  // The slot walk now resolves the pattern position the way the tool's own parser
+  // does, left to right, which covers both orders with one rule.
+  it.each([
+    [`grep TODO -- ${K}`, 'block'],
+    [`egrep TODO -- ${K}`, 'block'],
+    [`rg TODO -- ${K}`, 'block'],
+    [`sudo grep TODO -- ${K}`, 'block'],
+    [`grep -n TODO -- ${K}`, 'block'],
+    [`grep -v -- -zzzz ${K}`, 'block'],
+    [`grep -- .env f.txt`, 'null'],
+    [`grep -rn -- .env docs/`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+describe('stage 5a — the rg table is complete from `rg --help`', () => {
+  // Round 5 found 40 documented switches in neither set, so ordinary searches read
+  // as UNKNOWN and kept blocking. These are the negated forms an engineer types.
+  it.each([
+    [`rg --no-heading .env src/`],
+    [`rg --no-heading -n .env src/`],
+    [`rg --ignore-vcs .env src/`],
+    [`rg --no-ignore-parent .env src/`],
+    [`rg --unicode .env src/`],
+    [`rg --passthrough .env src/`],
+    [`rg --messages .env src/`],
+  ])('%s', (c) => expect(v(c)).toBe('null'));
 });
 
 describe('stage 5a — a lone dash is not a flag', () => {
