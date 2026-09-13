@@ -761,6 +761,10 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '--max-columns',
       '--max-count',
       '--max-depth',
+      // An ALIAS of --max-depth, and it takes a value. The round-5 extraction read
+      // alias lines as plain switches and swept it into noValue, which hard-blocked
+      // `rg --maxdepth 2 .env src` while `--max-depth 2` ran (/code-review round 7).
+      '--maxdepth',
       '--max-filesize',
       '--path-separator',
       '--pre',
@@ -889,7 +893,6 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
       '--ignore-messages',
       '--ignore-parent',
       '--ignore-vcs',
-      '--maxdepth',
       '--messages',
       '--no-auto-hybrid-regex',
       '--no-binary',
@@ -1018,6 +1021,15 @@ interface CopyShape {
   targetDirFlag?: boolean;
   /** Flags whose operand is NEVER a source: a short LETTER ('i') or a long name ('--exclude'). */
   skipFlags?: string[];
+  /**
+   * Short LETTERS this verb's getopt treats as taking an argument. Needed to read
+   * a bundle the way getopt does: the FIRST such letter swallows the rest of the
+   * token, so `-St` is `-S t` (suffix "t") and NOT `--target-directory`.
+   * /code-review round 7 measured the cost of guessing: `cp -St ~/.ssh/id_rsa
+   * /tmp/stolen` copies the key on real coreutils 9.4 and produced no finding,
+   * because a `t` anywhere in the bundle was read as the target-directory flag.
+   */
+  valueLetters?: string[];
 }
 
 const SCP_VALUE_FLAGS = ['i', 'F', 'o', 'c', 'S', 'P', 'J', 'D', 'W', 'l'];
@@ -1033,11 +1045,16 @@ const RSYNC_SKIP = [
   '--filter',
 ];
 
+// GNU coreutils short options that take an argument, per verb's own --help.
+// `S` (backup suffix) is the one that matters: it precedes `t` alphabetically in
+// every bundle an attacker would type.
+const CP_VALUE_LETTERS = ['S', 't'];
+const INSTALL_VALUE_LETTERS = ['S', 't', 'g', 'm', 'o'];
 export const COPY_VERBS: Record<string, CopyShape> = {
-  cp: { source: 'allButLast', targetDirFlag: true },
-  mv: { source: 'allButLast', targetDirFlag: true },
-  install: { source: 'allButLast', targetDirFlag: true },
-  ln: { source: 'first', targetDirFlag: true },
+  cp: { source: 'allButLast', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
+  mv: { source: 'allButLast', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
+  install: { source: 'allButLast', targetDirFlag: true, valueLetters: INSTALL_VALUE_LETTERS },
+  ln: { source: 'first', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
   scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS },
   rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP },
   tar: {
@@ -2752,12 +2769,25 @@ function copySourcePaths(words: (string | null)[]): string[] {
   // ~/.ssh/id_rsa` reviewed (/code-review round 6). For cp/mv/install a `t`
   // anywhere in a short bundle IS --target-directory, and the long form resolves
   // by getopt prefix like every other long flag.
+  // The FIRST argument-taking letter of a short bundle swallows the rest of the
+  // token, so `-St` is `-S t` (a backup suffix) and NOT a target directory --
+  // measured on coreutils 9.4, where `cp -St KEY /tmp/stolen` copies the key.
+  // Reading a `t` ANYWHERE produced no finding for that command
+  // (/code-review round 7). `null` when the bundle names no value-taking letter.
+  const firstValueLetter = (w: string): { letter: string; last: boolean } | null => {
+    const letters = w.slice(1);
+    for (let i = 0; i < letters.length; i++) {
+      if ((shape.valueLetters ?? []).includes(letters[i]))
+        return { letter: letters[i], last: i === letters.length - 1 };
+    }
+    return null;
+  };
   const isTargetDirFlag = (w: string): boolean => {
     if (w.startsWith('--')) {
       const name = w.includes('=') ? w.slice(0, w.indexOf('=')) : w;
       return name.length >= 3 && '--target-directory'.startsWith(name);
     }
-    return /^-[a-zA-Z]*t/.test(w);
+    return firstValueLetter(w)?.letter === 't';
   };
   const targetDir =
     shape.targetDirFlag === true &&
@@ -2774,8 +2804,8 @@ function copySourcePaths(words: (string | null)[]): string[] {
   const targetTakesNextWord = (w: string): boolean => {
     if (w.startsWith('--'))
       return !w.includes('=') && w.length >= 3 && '--target-directory'.startsWith(w);
-    const m = /^-[a-zA-Z]*?t(.*)$/.exec(w);
-    return m !== null && m[1] === '';
+    const f = firstValueLetter(w);
+    return f !== null && f.letter === 't' && f.last;
   };
   const targetOperand = (a: PositionedArg) =>
     targetDir && a.afterFlag !== null && targetTakesNextWord(a.afterFlag);
@@ -2801,10 +2831,17 @@ function copySourcePaths(words: (string | null)[]): string[] {
       src = targetDir ? args : args.slice(0, 1);
       break;
     case 'flagOperand': {
+      // BOTH attached spellings: `--file=PATH` and the short `-fPATH`, which
+      // argparse-based CLIs (az) accept and which this filter used to throw away
+      // by requiring `--` (/code-review round 7).
       const inline = tail
-        .filter((w): w is string => w !== null && w.startsWith('--'))
+        .filter((w): w is string => w !== null && w.startsWith('-'))
         .map((w) => flagInfo(w))
-        .filter((f) => f.attached !== null && (shape.sourceFlags ?? []).includes(f.long ?? ''))
+        .filter(
+          (f) =>
+            f.attached !== null &&
+            (shape.sourceFlags ?? []).includes(f.long ?? f.letter ?? '\u0000')
+        )
         .map((f) => f.attached as string);
       return [
         ...args

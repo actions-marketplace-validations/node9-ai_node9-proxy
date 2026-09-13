@@ -523,6 +523,20 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //     `grep --group-separator=--- -A1 .env notes.md`. The VALUE is still judged.
 //   - the UNKNOWN abort had no test row: neutering it left 1995 tests green while
 //     round 2's measured bypass returned. It has its own witness now.
+// /code-review round 7 found the last bypass of this series, in the COPY tier's
+// bundle parsing rather than the pattern slot: `cp -St ~/.ssh/id_rsa /tmp/stolen`
+// copies the key on coreutils 9.4 and produced no finding, because a `t` anywhere
+// in a short bundle was read as --target-directory when `-S` (backup suffix) had
+// already swallowed it. The verbs now declare which LETTERS take an argument, and
+// the first of them owns the rest of the token, the way getopt reads it. Also:
+// `rg --maxdepth` is an ALIAS of `--max-depth` and takes a value (the round-5
+// extraction read alias lines as switches), and the flagOperand shape missed a
+// short attached source (`az ... -f/path`).
+//
+// Six arms that changed behaviour with NO test row were found by mutation and now
+// have witnesses: both lone-dash guards, the short-bundle UNKNOWN arm, the
+// ambiguous-abbreviation arm, operandOf's attached-value check, and the in-jail
+// exemption's `every`. Each mutant is re-killed by the row written for it.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -547,7 +561,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'e8d1a4647c84d6a1';
+export const CANONICAL_EXTRACTOR_HASH = 'b042bcd2276064dd';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

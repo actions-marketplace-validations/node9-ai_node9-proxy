@@ -262,8 +262,8 @@ describe('stage 5a — the flag tables are pinned by content', () => {
   it.each([
     ['grep', 'takesValue', '22:d09f79f5'],
     ['grep', 'noValue', '62:d48d145d'],
-    ['rg', 'takesValue', '49:1a1722dc'],
-    ['rg', 'noValue', '141:c0ef2654'],
+    ['rg', 'takesValue', '50:afafdf9b'],
+    ['rg', 'noValue', '140:6fb8c373'],
   ])('%s %s', (verb, which, want) => {
     const shape = patternShapeOf(verb)!;
     expect(digest(which === 'takesValue' ? shape.takesValue : shape.noValue)).toBe(want);
@@ -567,6 +567,36 @@ describe('stage 5a — an unknown flag before the pattern excuses nothing', () =
     // and the VALUE is judged separately.
     expect(v(`grep --group-separator=--- -A1 .env notes.md`)).toBe('null');
     expect(v(`grep --config=${K} needle`)).toBe('block');
+  });
+});
+
+// ── 6f. /code-review round 7: five arms that changed behaviour with no row. ─
+// Each was found by MUTATION -- neutering the arm left the whole suite green while
+// a measured bypass returned. A guard with no witness is a guard that can be
+// deleted by the next person reading the file.
+describe('stage 5a — the arms that had no witness', () => {
+  it('a lone dash: BOTH guards are load-bearing', () => {
+    // `positionedArgs` calls `-` a flag and flagEffect has two arms that stop it
+    // becoming a no-value flag. Dropping either alone changed nothing; dropping
+    // both flipped this row, which is round 3's measured key-printing bypass.
+    expect(v(`grep - ${K}`)).toBe('block');
+    expect(v(`grep -- - ${K}`)).toBe('block');
+    expect(v(`grep -v - ${K}`)).toBe('block');
+    expect(v(`rg - ${K}`)).toBe('block');
+  });
+
+  it('an UNKNOWN SHORT flag aborts the excuse, like an unknown long one', () => {
+    // The long-flag arm got its row in round 6; the short arm had none.
+    expect(v(`grep -X ${K} needle`)).toBe('block');
+    expect(v(`grep -rX ${K} needle`)).toBe('block');
+    expect(v(`rg -Q ${K} needle`)).toBe('block');
+  });
+
+  it('an AMBIGUOUS abbreviation is unknown, not a coin toss', () => {
+    // `--co` prefixes --color, --count and --context: one takes a value and the
+    // others do not, so slots cannot be counted past it. (GNU grep rejects the
+    // ambiguity outright, so this costs nothing real.)
+    expect(v(`grep --co ${K} needle`)).toBe('block');
   });
 });
 
