@@ -344,7 +344,45 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // and a path separator: a redirect read under a copy head (`gzip < KEY`) and an
 // absolute reader path (`/bin/cat KEY`) now reach the read rule and BLOCK.
 // Verdict snapshot over 390 corpus commands: 41 moved, all to review, 0 loosened.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v14';
+// v15 (2026-09-13): stage 5 of the credential jail. TWO halves, one version,
+// because one version bump means one fleet re-scan and two would mean two.
+//
+// Half one, JAIL-10: a jailed path inside a `--flag=value` token was never
+// judged. `positionedArgs` calls any word starting with `-` a flag, so the value
+// half never reached matchSensitivePath and the same read blocked or passed on
+// spelling alone. Only flags whose operand is a FILE THE VERB OPENS are judged,
+// each entry earned under `strace -e openat` against a decoy file. Measured
+// through extractCanonicalFindings before bumping:
+//
+//   command                                v14                 v15
+//   grep --file=KEY f.txt                (none)  ->  ast-fs-op block/critical
+//   grep --exclude-from=KEY -r x .       (none)  ->  ast-fs-op block/critical
+//   grep --include=KEY -r x ~            (none)  ->  ast-fs-op block/critical
+//   sed --file=KEY f.txt                 (none)  ->  ast-fs-op block/critical
+//   sort --files0-from=KEY               (none)  ->  ast-fs-op block/critical
+//   rg --file=KEY src/                   (none)  ->  ast-fs-op block/critical
+//   awk --file=KEY f.txt                 (none)  ->  ast-fs-op block/critical
+//   sudo grep --file=KEY f.txt           (none)  ->  ast-fs-op block/critical
+//   grep --file=~/p/.env f.txt           (none)  ->  ast-fs-op block/high
+//   grep --exclude=.env -r x .           (none)  ->  (none)   EXCLUDING reads nothing
+//   grep --regexp=.env f.txt             (none)  ->  (none)   a pattern, not a path
+//   sed --expression=s/.aws/x/ f.txt     (none)  ->  (none)   a script, not a path
+//   cut --output-delimiter=.env f.txt    (none)  ->  (none)   a string, not a path
+//   sort --output=KEY /tmp/newkey        (none)  ->  (none)   a WRITE: CI key install
+//   tail --follow=KEY                    (none)  ->  (none)   opens nothing (measured)
+//   grep --color=always foo f.txt        (none)  ->  (none)   ordinary flag value
+//   cat KEY                              block   ->  block    (control, unmoved)
+//   grep -f KEY f.txt                    block   ->  block    (control, unmoved)
+//
+// The five quiet `=` rows are the reason this is a per-flag table and not
+// "judge every `=` value": that reading would have invented four false
+// positives, one of them the CI key-install case the corpus protects.
+// Verdict snapshot over 390 corpus commands: 0 moved -- no corpus row used an
+// `=` spelling, which is exactly why the bypass survived four stages.
+//
+// Half two lands in this same version before release: the pattern SLOT, so a
+// search pattern is no longer read as a path. See doc/jail-stage5-pattern-slot-design.md.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -364,7 +402,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v14';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '8b5729fe236a195b';
+export const CANONICAL_EXTRACTOR_HASH = '13416ff1132c5379';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

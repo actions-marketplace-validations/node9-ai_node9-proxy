@@ -472,6 +472,45 @@ export const FS_READ_TOOLS = new Set([
   'dd',
 ]);
 
+// ── JAIL-10: a flag whose OPERAND IS A FILE THE VERB OPENS ──────────────────
+// `positionedArgs` calls any word starting with `-` a flag, so the value half of
+// an `=`-joined token never reached matchSensitivePath: `grep -f KEY f.txt`
+// blocked while `grep --file=KEY f.txt` was ALLOW -- the same read, one spelling
+// apart. The separated spelling was never the bug (its operand is a positional
+// word and is judged like any other); only the `=` form needs this table.
+//
+// Every entry was earned under `strace -e openat` against a decoy file
+// (2026-09-13), because a row is only a bypass if the command ACTUALLY OPENS the
+// file. Two candidates were refuted that way and are pinned as allow in
+// jail-flag-operand.spec.ts: `awk --file=` (mawk rejects the spelling) and
+// `tail --follow=` (invalid argument).
+//
+// ⚠️ Deliberately NOT "judge every `=` value". Measured, that reading blocks
+// `grep --exclude=.env` (a search that EXCLUDES the file reads nothing),
+// `grep --regexp=.env` and `sed --expression=s/.aws/x/` (a pattern, not a path),
+// and `sort --output=KEY` (a WRITE -- the legitimate CI key-install case the
+// corpus protects). New false positives inside a stage whose purpose is removing
+// them is the one outcome to avoid.
+//
+// ⚠️ The unsafe direction for THIS table is OMISSION: a file-operand flag not
+// listed here keeps its bypass. That is the state today, not a regression, but it
+// is not closed either. `rsync --files-from=` opens the file too and is NOT here:
+// rsync is not a reader, it belongs to the copy and network tiers (follow-up).
+const GREP_FILE_OPERANDS = new Set(['-f', '--file', '--exclude-from', '--include']);
+const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
+  grep: GREP_FILE_OPERANDS,
+  egrep: GREP_FILE_OPERANDS,
+  fgrep: GREP_FILE_OPERANDS,
+  // rg and gawk are NOT installed on the measuring machine: these two rows are
+  // from the shipped documentation (ripgrep `-f/--file`, `--ignore-file`; gawk
+  // `-f/--file`) and are marked as such in the spec.
+  rg: new Set(['-f', '--file', '--ignore-file']),
+  sed: new Set(['-f', '--file']),
+  awk: new Set(['-f', '--file']),
+  gawk: new Set(['-f', '--file']),
+  sort: new Set(['--files0-from']),
+};
+
 // Fast-path screen: the AST detector only fires when one of these tools is
 // the *command name of a CallExpr* — i.e. it appears at start-of-command
 // position. mvdan-sh produces a CallExpr only when the token sits at:
@@ -2082,7 +2121,9 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
 
       // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
       // wrapper, or as find's -exec action.
-      const readPaths = FS_READ_TOOLS.has(name) ? paths : wrappedReadPaths(words, name);
+      const readPaths = FS_READ_TOOLS.has(name)
+        ? [...paths, ...flagOperandFiles(name, words, 1)]
+        : wrappedReadPaths(words, name);
       if (readPaths) {
         for (const p of readPaths) {
           result = stricter(result, matchSensitivePath(p));
@@ -2422,6 +2463,31 @@ const positionalAfter = (words: (string | null)[], from: number, to = words.leng
   positionedArgs(words, from, to).map((a) => a.value);
 
 /**
+ * JAIL-10: the values of `=`-joined flag tokens whose flag opens a file for this
+ * verb (`grep --file=KEY` -> ['KEY']). Empty for a verb with no such flag.
+ *
+ * Only the `=` form: a separated operand (`grep --file KEY`) is already a
+ * positional word and is judged by the caller's own path list. `from` is the
+ * first word after the verb, so a wrapped read (`sudo grep --file=KEY`) is
+ * scanned from the unwrapped head and not from argv[0].
+ */
+function flagOperandFiles(verb: string, words: (string | null)[], from: number): string[] {
+  const flags = FILE_OPERAND_FLAGS[verb];
+  if (!flags) return [];
+  const out: string[] = [];
+  for (let i = from; i < words.length; i++) {
+    const w = words[i];
+    if (w === null || !w.startsWith('-')) continue;
+    const eq = w.indexOf('=');
+    if (eq <= 0) continue;
+    if (!flags.has(w.slice(0, eq))) continue;
+    const value = w.slice(eq + 1);
+    if (value) out.push(value);
+  }
+  return out;
+}
+
+/**
  * Non-flag literal words after the reader when the reader is reached through
  * a wrapper, a runner, `chroot`, or find's -exec action. Null when this
  * CallExpr is not a wrapped read.
@@ -2445,7 +2511,9 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
   }
   if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
   const h = unwrapCommandHead(words);
-  return h > 0 && isReaderWord(words[h] ?? null) ? positionalAfter(words, h + 1) : null;
+  if (h <= 0 || !isReaderWord(words[h] ?? null)) return null;
+  const head = baseWord(words[h]);
+  return [...positionalAfter(words, h + 1), ...flagOperandFiles(head, words, h + 1)];
 }
 
 /**
