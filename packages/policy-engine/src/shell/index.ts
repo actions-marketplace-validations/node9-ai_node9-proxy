@@ -2905,14 +2905,25 @@ function copySourcePaths(words: (string | null)[]): string[] {
       // BOTH attached spellings: `--file=PATH` and the short `-fPATH`, which
       // argparse-based CLIs (az) accept and which this filter used to throw away
       // by requiring `--` (/code-review round 7).
+      // An ATTACHED source operand, in every spelling the tool accepts:
+      // `--file=KEY`, the short `-fKEY`, and a getopt ABBREVIATION of the long
+      // name (`--fil=KEY`, which argparse resolves and really uploads). The
+      // exact-name test missed the last of those, so the commit that generalised
+      // prefix resolution left the same misreading live one `=` away
+      // (/code-review final round).
+      const namesSource = (f: { long: string | null; letter: string | null }): boolean => {
+        const names = shape.sourceFlags ?? [];
+        if (f.long !== null)
+          return names.some(
+            (n) =>
+              n.startsWith('--') && (n === f.long || (f.long!.length >= 3 && n.startsWith(f.long!)))
+          );
+        return f.letter !== null && names.includes(f.letter);
+      };
       const inline = tail
         .filter((w): w is string => w !== null && w.startsWith('-'))
         .map((w) => flagInfo(w))
-        .filter(
-          (f) =>
-            f.attached !== null &&
-            (shape.sourceFlags ?? []).includes(f.long ?? f.letter ?? '\u0000')
-        )
+        .filter((f) => f.attached !== null && namesSource(f))
         .map((f) => f.attached as string);
       return [
         ...args

@@ -381,7 +381,26 @@ describe('a long source flag resolves by getopt prefix', () => {
     [`az storage blob upload --file ${K8} -c n9`],
     [`az storage blob upload --fil ${K8} -c n9`],
     [`az storage blob upload -f${K8} -c n9`],
+    // ATTACHED and abbreviated at once. argparse resolves `--fil=` and really
+    // uploads the key; the exact-name test missed it, so a fix declared
+    // generalised was beaten by one `=` (final /code-review round).
+    [`az storage blob upload --file=${K8} -c n9`],
+    [`az storage blob upload --fil=${K8} -c n9`],
+    [`az storage blob upload --f=${K8} -c n9`],
   ])('%s is a review', (c) => expect(verdict(c)).toBe('review'));
+
+  it('rsync `-z` takes no argument, so the slot after it is still a source', () => {
+    // Removing `z` from RSYNC_VALUE_LETTERS had no witness: re-adding it left the
+    // whole suite green while this row is the one that moves.
+    expect(verdict(`rsync -z ${K8} host:/tmp/`)).toBe('review');
+    expect(verdict(`rsync -az ${K8} host:/tmp/`)).toBe('review');
+  });
+
+  it('a source flag past `--` is not a source flag', () => {
+    // The third `--` guard was the only one with no test in either direction.
+    expect(verdict(`az storage blob upload -- --file ${K8} -c n9`)).toBe('null');
+    expect(verdict(`az storage blob upload --file ${K8} -- -c n9`)).toBe('review');
+  });
 });
 
 describe('every skipped short letter must also be a value letter (derived)', () => {
