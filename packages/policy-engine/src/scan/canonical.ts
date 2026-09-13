@@ -410,6 +410,19 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //   cat KEY                              block   ->  block   (control)
 //   sed -i s/.aws/x/ f.txt               block   ->  block   stage 5b, still an FP
 //
+// /code-review round 1 (2026-09-13) found six issues in the two halves above,
+// three of them BLOCK -> ALLOW regressions this stage introduced, all fixed with
+// a red row each and none of them moving the corpus:
+//   - getopt_long takes any unambiguous PREFIX, so `grep --regex=foo KEY` and
+//     `grep --inc=KEY` resolved to --regexp/--include in the real tool while
+//     exact-name matching here excused the key. namesFlag now resolves prefixes,
+//     with getopt's own exact-wins rule (without it, `--exclude` read as
+//     `--exclude-from` and invented a false positive).
+//   - `--group-separator` takes an OPTIONAL argument in ugrep 7.8.4, so it eats
+//     nothing and `grep -H --group-separator SECRET KEY` read the key. Removed
+//     from the value set: the engine cannot know which grep is installed.
+//   - an ATTACHED short operand (`grep -fKEY`, `sed -fKEY`) is the third
+//     spelling of one read and was never covered.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -434,7 +447,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '5e7d4b85ac024aa5';
+export const CANONICAL_EXTRACTOR_HASH = '3382ab4ae56837a6';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

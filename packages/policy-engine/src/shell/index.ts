@@ -543,6 +543,21 @@ interface PatternShape {
    *  or a listing mode). */
   noPatternFlags: Set<string>;
 }
+// Long flags MEASURED to consume nothing. They are here only for the
+// exact-wins rule in namesFlag: `--color` must not resolve as a prefix of
+// something longer, and `grep --color never foo KEY` must keep judging KEY.
+const KNOWN_NO_VALUE_FLAGS: Record<string, string[]> = {
+  grep: [
+    '--color',
+    '--colour',
+    '--group-separator',
+    '--no-group-separator',
+    '--count',
+    '--help',
+    '--version',
+  ],
+  rg: ['--files', '--type-list', '--json', '--stats', '--passthru', '--help', '--version'],
+};
 const GREP_SHAPE: PatternShape = {
   takesValue: new Set([
     '-A',
@@ -565,13 +580,14 @@ const GREP_SHAPE: PatternShape = {
     '--exclude',
     '--exclude-from',
     '--exclude-dir',
-    '--group-separator',
     '--regexp',
     '--file',
   ]),
   patternFlags: new Set(['-e', '--regexp']),
   noPatternFlags: new Set(['-f', '--file']),
 };
+KNOWN_NO_VALUE_FLAGS.egrep = KNOWN_NO_VALUE_FLAGS.grep;
+KNOWN_NO_VALUE_FLAGS.fgrep = KNOWN_NO_VALUE_FLAGS.grep;
 const PATTERN_VERBS: Record<string, PatternShape> = {
   grep: GREP_SHAPE,
   // /usr/bin/egrep and /usr/bin/fgrep are 41-byte shell wrappers that exec
@@ -642,6 +658,11 @@ const PATTERN_VERBS: Record<string, PatternShape> = {
 export const PATTERN_VERB_NAMES = Object.keys(PATTERN_VERBS);
 export const patternShapeOf = (verb: string): PatternShape | undefined => PATTERN_VERBS[verb];
 
+// ⚠️ `--include` carries a GLOB, not a path, and is here because the LITERAL
+// spelling (`--include=.env`) makes grep open that file. A glob spelling escapes
+// it -- `--include=*env` and `--include=.en?` read the same file and are measured
+// ALLOW (/code-review round 1). Judging globs would mean expanding them, which
+// this tier cannot do; recorded as a known gap rather than claimed closed.
 const GREP_FILE_OPERANDS = new Set(['-f', '--file', '--exclude-from', '--include']);
 const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
   grep: GREP_FILE_OPERANDS,
@@ -2617,6 +2638,45 @@ const positionalAfter = (words: (string | null)[], from: number, to = words.leng
  * first word after the verb, so a wrapped read (`sudo grep --file=KEY`) is
  * scanned from the unwrapped head and not from argv[0].
  */
+/**
+ * Does `name` name one of `candidates`, the way getopt_long resolves it?
+ *
+ * getopt_long accepts any unambiguous PREFIX, so `--regex` IS `--regexp` and
+ * `--inc=` IS `--include=`. /code-review round 1 (2026-09-13) measured three
+ * BLOCK -> ALLOW regressions from exact-name matching alone: `grep --regex=foo
+ * KEY` excused the key, and GNU grep opened it.
+ *
+ * But getopt resolves an EXACT option name as itself and never as a prefix of a
+ * longer one, and dropping that rule invents false positives: `--exclude` is
+ * grep's own option, not an abbreviation of `--exclude-from`, so treating it as
+ * one blocked `grep --exclude=.env -r x .` -- a search that EXCLUDES the file and
+ * reads nothing (caught by this stage's own spec on the first attempt).
+ *
+ * So: an exact hit always counts; a name that is itself a KNOWN option of this
+ * verb counts only exactly; anything else may resolve by prefix. Prefix
+ * resolution is otherwise generous, because every use of this predicate errs
+ * toward MORE judging, and an ambiguous prefix makes the real command fail.
+ */
+function namesFlag(name: string, candidates: Set<string>, known?: Set<string>): boolean {
+  if (candidates.has(name)) return true;
+  if (!name.startsWith('--') || name.length < 3) return false;
+  if (known?.has(name)) return false;
+  for (const c of candidates) if (c.startsWith(name)) return true;
+  return false;
+}
+
+/** Every long option this verb is KNOWN to have, for the exact-wins rule above. */
+function knownLongFlags(verb: string): Set<string> {
+  const out = new Set<string>(KNOWN_NO_VALUE_FLAGS[verb] ?? []);
+  const shape = PATTERN_VERBS[verb];
+  if (shape) {
+    for (const set of [shape.takesValue, shape.patternFlags, shape.noPatternFlags])
+      for (const f of set) if (f.startsWith('--')) out.add(f);
+  }
+  for (const f of FILE_OPERAND_FLAGS[verb] ?? []) if (f.startsWith('--')) out.add(f);
+  return out;
+}
+
 /** The flag NAMES a token carries: `--file=x` -> ['--file'], `-rnf` -> ['-r','-n','-f']. */
 function flagNamesOf(token: string): string[] {
   if (token.startsWith('--')) {
@@ -2638,10 +2698,10 @@ function flagNamesOf(token: string): string[] {
  * value and consumes nothing. Both spellings fail in the UNSAFE direction if
  * treated naively, and both are pinned in jail-pattern-slot.spec.ts.
  */
-function consumesNextWord(token: string, shape: PatternShape): string | null {
+function consumesNextWord(token: string, shape: PatternShape, known: Set<string>): string | null {
   if (token.startsWith('--')) {
     if (token.includes('=')) return null;
-    return shape.takesValue.has(token) ? token : null;
+    return namesFlag(token, shape.takesValue, known) ? token : null;
   }
   const letters = token.slice(1);
   for (let i = 0; i < letters.length; i++) {
@@ -2665,18 +2725,19 @@ function readTargets(verb: string, args: PositionedArg[], flags: string[]): stri
   const shape = PATTERN_VERBS[verb];
   if (!shape) return args.map((a) => a.value);
   const names = flags.flatMap(flagNamesOf);
+  const known = knownLongFlags(verb);
   const patternElsewhere = names.some(
-    (n) => shape.patternFlags.has(n) || shape.noPatternFlags.has(n)
+    (n) => namesFlag(n, shape.patternFlags, known) || namesFlag(n, shape.noPatternFlags, known)
   );
   const excused = new Set<PositionedArg>();
   for (const a of args) {
     if (a.afterFlag === null) continue;
-    const c = consumesNextWord(a.afterFlag, shape);
-    if (c !== null && shape.patternFlags.has(c)) excused.add(a);
+    const c = consumesNextWord(a.afterFlag, shape, known);
+    if (c !== null && namesFlag(c, shape.patternFlags, known)) excused.add(a);
   }
   if (!patternElsewhere) {
     const slot = args.find(
-      (a) => a.afterFlag === null || consumesNextWord(a.afterFlag, shape) === null
+      (a) => a.afterFlag === null || consumesNextWord(a.afterFlag, shape, known) === null
     );
     if (slot) excused.add(slot);
   }
@@ -2686,15 +2747,33 @@ function readTargets(verb: string, args: PositionedArg[], flags: string[]): stri
 function flagOperandFiles(verb: string, words: (string | null)[], from: number): string[] {
   const flags = FILE_OPERAND_FLAGS[verb];
   if (!flags) return [];
+  const known = knownLongFlags(verb);
   const out: string[] = [];
   for (let i = from; i < words.length; i++) {
     const w = words[i];
-    if (w === null || !w.startsWith('-')) continue;
-    const eq = w.indexOf('=');
-    if (eq <= 0) continue;
-    if (!flags.has(w.slice(0, eq))) continue;
-    const value = w.slice(eq + 1);
-    if (value) out.push(value);
+    if (w === null || !w.startsWith('-') || w === '--') continue;
+    if (w.startsWith('--')) {
+      // `--file=KEY`, and its getopt_long abbreviations (`--fil=KEY`).
+      const eq = w.indexOf('=');
+      if (eq <= 0) continue;
+      if (!namesFlag(w.slice(0, eq), flags, known)) continue;
+      const value = w.slice(eq + 1);
+      if (value) out.push(value);
+      continue;
+    }
+    // ATTACHED short operand: `grep -fKEY`, `grep -nfKEY`, `sed -fKEY`. The
+    // third spelling of one read, and the one the first cut of JAIL-10 missed
+    // while claiming only `=` needed this table (/code-review round 1, measured
+    // under strace: `grep -fKEY` opens KEY). The first argument-taking letter
+    // swallows the REST of the token, so only that letter's operand counts.
+    const letters = w.slice(1);
+    for (let j = 0; j < letters.length; j++) {
+      const name = `-${letters[j]}`;
+      if (!flags.has(name)) continue;
+      const attached = letters.slice(j + 1);
+      if (attached) out.push(attached);
+      break;
+    }
   }
   return out;
 }

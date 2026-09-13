@@ -144,6 +144,63 @@ describe('stage 5a — bundled and `=` spellings must not excuse a file', () => 
   });
 });
 
+// ── 6b. /code-review round 1 (2026-09-13): three BLOCK -> ALLOW regressions. ─
+// Each was measured on the real binary with `strace -e openat` before the row
+// was written, and each was a regression introduced by the first cut of this
+// stage, not a pre-existing gap.
+describe('stage 5a — a long flag ABBREVIATION still resolves', () => {
+  // getopt_long accepts any unambiguous PREFIX, so `--regex` IS `--regexp`: the
+  // pattern arrives by flag and the positional is a FILE. Exact-name matching
+  // missed it and excused the key. Measured: GNU grep opens the key.
+  it.each([
+    [`grep --regex=foo ${K}`],
+    [`grep --rege=foo ${K}`],
+    [`grep --reg=foo ${K}`],
+    [`rg --regex=foo ${K}`],
+    // the separated spelling of a value flag: its operand is still judged
+    [`grep --exclude-f ${K} -r x sub`],
+    [`grep --exclude-fr ${K} -r x sub`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('and an abbreviation of a no-pattern flag means every positional is a FILE', () => {
+    expect(v(`grep --fil patterns.txt ${K}`)).toBe('block');
+    expect(v(`rg --file patterns.txt ${K}`)).toBe('block');
+  });
+});
+
+describe('stage 5a — an OPTIONAL-argument flag consumes nothing', () => {
+  // `--group-separator` was listed as value-taking on GNU grep's evidence. In
+  // ugrep 7.8.4 -- which is what `grep` resolves to in some shells -- its
+  // argument is OPTIONAL, so it eats nothing and the next word is the pattern.
+  // Measured: `grep -H --group-separator SECRETLINE KEY` printed the key's line.
+  // The engine cannot know which binary is installed, so it must not assume the
+  // spelling that excuses a file. Same resolution as `awk --file=`: judge.
+  it.each([
+    [`grep -H --group-separator SECRET ${K}`],
+    [`grep -r --group-separator x ${D}`],
+    [`grep --group-separator x ${K}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+});
+
+// ── 6c. Every value flag's OPERAND is judged, never excused. DERIVED. ────────
+// The guard in block 3 cannot tell a correctly-declared value flag from a
+// wrongly-declared one: `VERB FLAG v foo JAILED` blocks either way, which is how
+// the --group-separator regression shipped green. This row pins the other half --
+// a value flag's own operand stays in the judged set -- and it does discriminate.
+describe('stage 5a — a value flag does not excuse its operand', () => {
+  const rows: Array<[string, string]> = [];
+  for (const verb of PATTERN_VERB_NAMES) {
+    const shape = patternShapeOf(verb)!;
+    for (const flag of shape.takesValue) {
+      if (shape.patternFlags.has(flag)) continue; // that operand IS the pattern
+      rows.push([verb, flag]);
+    }
+  }
+  it.each(rows)('%s %s <jailed> foo blocks', (verb, flag) => {
+    expect(v(`${verb} ${flag} ${K} foo`)).toBe('block');
+  });
+});
+
 // ── 7. Reached through a wrapper: the same table. ────────────────────────────
 describe('stage 5a — the wrapped read sees the same slots', () => {
   it.each([

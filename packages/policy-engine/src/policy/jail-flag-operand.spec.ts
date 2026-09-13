@@ -67,6 +67,35 @@ describe('JAIL-10 — the `=` spelling must reach the same verdict', () => {
   });
 });
 
+describe('JAIL-10 — /code-review round 1: two more spellings of the same read', () => {
+  // A long flag ABBREVIATION: getopt_long takes any unambiguous prefix, so
+  // `--inc=` IS `--include=`. Measured: grep opens the file.
+  it.each([
+    [`grep --inc=${K} -r x /home/u`],
+    [`grep --exclude-f=${K} -r x .`],
+    [`grep --fil=${K} f.txt`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  // An ATTACHED short-flag operand, the third spelling. `grep -fKEY` is the same
+  // read as `grep -f KEY` and `grep --file=KEY`; strace confirms it opens KEY.
+  // The first cut of JAIL-10 claimed only the `=` form needed the table, which
+  // was wrong.
+  it.each([
+    [`grep -f${K} f.txt`],
+    [`grep -nf${K} f.txt`],
+    [`sed -f${K} f.txt`],
+    [`awk -f${K} f.txt`],
+    [`rg -f${K} src/`],
+    [`sudo grep -f${K} f.txt`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('an attached operand on a flag that reads NO file stays quiet', () => {
+    // -e is a pattern flag: `-e.env` is a regex, not a path.
+    expect(v(`grep -e${E} f.txt`)).toBe('null');
+    expect(v(`grep -m2 foo f.txt`)).toBe('null');
+  });
+});
+
 describe('JAIL-10 — what must NOT be judged (measured: opens nothing)', () => {
   it.each([
     // a pattern or a script, not a file
