@@ -600,6 +600,31 @@ describe('stage 5a — the arms that had no witness', () => {
   });
 });
 
+// ── 6g. /code-review round 8: `--` in the flag-operand EXCUSAL loops. ───────
+// Round 5 taught the pattern WALK that `--` ends the options and left these loops
+// behind, so the word after a post-`--` flag-looking word was excused as that
+// flag's operand. GNU grep opens and prints from the file.
+describe('stage 5a — `--` ends the options for the excusal loops too', () => {
+  it.each([
+    [`grep -- -m ${K}`],
+    [`grep -- -A ${K}`],
+    [`rg -- --maxdepth ${K}`],
+    [`grep -- -e ${K}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('and a flag BEFORE `--` still excuses its operand', () => {
+    expect(v(`grep -m 2 -- .env f.txt`)).toBe('null');
+    expect(v(`grep -A 3 .env f.txt`)).toBe('null');
+  });
+
+  it('a reader with no PatternShape knows its own value letters', () => {
+    // `-v` owns the rest of `-vfile=...`, so there is no `-f` operand to judge.
+    expect(v(`awk -vfile=/home/u/.ssh/config 'BEGIN{}'`)).toBe('null');
+    expect(v(`awk -f${K} f.txt`)).toBe('block');
+    expect(v(`sed -f${K} f.txt`)).toBe('block');
+  });
+});
+
 // ── 7. Reached through a wrapper: the same table. ────────────────────────────
 describe('stage 5a — the wrapped read sees the same slots', () => {
   it.each([

@@ -1053,7 +1053,7 @@ const TAR_VALUE_LETTERS = ['b', 'C', 'f', 'F', 'g', 'H', 'I', 'K', 'L', 'N', 'T'
 // operand to SKIP must also be known to TAKE one, or the skip silently stops
 // working. jail-copy.spec.ts derives a row from exactly that invariant.
 const ZIP_VALUE_LETTERS = ['b', 'n', 'P', 't', 's', 'O', 'x', 'i'];
-const RSYNC_VALUE_LETTERS = ['e', 'f', 'T', 'B', 'M', 'z'];
+const RSYNC_VALUE_LETTERS = ['e', 'f', 'T', 'B', 'M'];
 const RSYNC_SKIP = [
   'e',
   '--rsh',
@@ -1091,9 +1091,6 @@ export const COPY_VERBS: Record<string, CopyShape> = {
     valueLetters: ZIP_VALUE_LETTERS,
   },
   ar: { source: 'archive', archive: 'ar' },
-  // 7z switches are INLINE only (`-mx9`, `-px`, `-x!pat`), so no following word is
-  // ever a switch's operand: an empty valueLetters keeps `7z a out.7z -mx KEY`
-  // from dropping the credential as `-x`'s operand (/code-review round 8).
   // 7z switches are INLINE only (`-mx9`, `-px`, `-x!pat`), so no following word is
   // ever a switch's operand -- which is why the short `x` is NOT a skipFlag here
   // and valueLetters is empty. Keeping the short `x` made `7z a out.7z -mx KEY`
@@ -2742,6 +2739,12 @@ function operandOf(
     }
     return false;
   }
+  if (w.startsWith('--') && !w.includes('=')) {
+    // getopt prefix, the same rule namesFlag applies on the read side:
+    // `az ... --fil KEY` is `--file KEY` (/code-review round 9).
+    const longs = names.filter((n) => n.startsWith('--'));
+    if (longs.some((n) => n === w || (w.length >= 3 && n.startsWith(w)))) return true;
+  }
   return flagIs(w, names) && flagInfo(w).attached === null;
 }
 
@@ -2785,8 +2788,13 @@ const FIND_OPTIONS = new Set(['-H', '-L', '-P']);
 function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
   const k = words.findIndex((w, i) => i > h && w !== null && FIND_EXEC_FLAGS.has(w));
   if (k < 0) return { k, starts: [] };
+  // `--` separates find's options from its start points; it is NOT a predicate.
+  // Treating it as one put `end` on it and erased every start point, so
+  // `find -- /home/u/.ssh -type f -exec cat {} +` produced no finding while the
+  // same command without `--` blocked (/code-review round 9, GNU find printed
+  // the key).
   const firstPredicate = words.findIndex(
-    (w, i) => i > h && w !== null && w.startsWith('-') && !FIND_OPTIONS.has(w)
+    (w, i) => i > h && w !== null && w !== '--' && w.startsWith('-') && !FIND_OPTIONS.has(w)
   );
   const end = firstPredicate > h ? firstPredicate : k;
   return { k, starts: positionalAfter(words, h + 1, end) };
@@ -2817,7 +2825,15 @@ function copySourcePaths(words: (string | null)[]): string[] {
   const { shape, last } = r;
   const args = positionedArgs(words, last + 1);
   const tail = words.slice(last + 1);
-  const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags, shape.valueLetters);
+  // Past `--` nothing is a flag, so no word there is a flag's operand. The read
+  // tier learned this in round 8 and the copy tier had the same hole:
+  // `rsync -- --exclude ~/.ssh/id_rsa rdst/` transferred the key with no finding
+  // (/code-review round 9, measured with rsync 3.2.7).
+  const copyOptionsEnd = tail.findIndex((w) => w === '--');
+  const copyPastOptions = (a: PositionedArg) =>
+    copyOptionsEnd >= 0 && a.argv > last + 1 + copyOptionsEnd;
+  const skipped = (a: PositionedArg) =>
+    !copyPastOptions(a) && operandOf(a, shape.skipFlags, shape.valueLetters);
   // `-t DIR` and its ATTACHED and ABBREVIATED spellings. flagInfo reads a short
   // bundle's LAST letter, so `-ttmp` gave letter `p` and the destination flag went
   // unseen: `cp -ttmp ~/.ssh/id_rsa` produced no finding at all while `cp -t tmp
@@ -2863,7 +2879,7 @@ function copySourcePaths(words: (string | null)[]): string[] {
     return f !== null && f.letter === 't' && f.last;
   };
   const targetOperand = (a: PositionedArg) =>
-    targetDir && a.afterFlag !== null && targetTakesNextWord(a.afterFlag);
+    targetDir && a.afterFlag !== null && !copyPastOptions(a) && targetTakesNextWord(a.afterFlag);
   // The destination is the last NON-FLAG word; when it is dynamic (`$DEST`) it
   // is not a slot, so every slot is a source (`cp K $DEST -v` ends in a flag).
   const lastOperand = [...tail].reverse().find((w) => w === null || !w.startsWith('-'));
@@ -2900,7 +2916,7 @@ function copySourcePaths(words: (string | null)[]): string[] {
         .map((f) => f.attached as string);
       return [
         ...args
-          .filter((a) => operandOf(a, shape.sourceFlags, shape.valueLetters))
+          .filter((a) => !copyPastOptions(a) && operandOf(a, shape.sourceFlags, shape.valueLetters))
           .map((a) => a.value),
         ...inline,
       ];
@@ -2977,13 +2993,26 @@ function archiveInputs(
       /(^|\s)-[a-zA-Z]*[cruA]|--create|--append|--update|--concatenate/.test(flagsText);
     if (extracting && !writing) return [];
     void mode;
-    let i = 0;
-    if (bareKey) {
-      i = 1;
-      const next = args[1];
-      if (first.value.includes('f') && next && next.afterFlag === null) i = 2; // the archive
+    if (!bareKey) return args;
+    // Each VALUE letter in the bare key takes one following word, in key order:
+    // `tar cCf DIR ARCHIVE .` is `-C DIR -f ARCHIVE .`. Consuming exactly one word
+    // (for `f`) gave DIR to the archive slot and dropped it, so
+    // `tar cCf ~/.ssh out.tar .` archived the keys with no finding
+    // (/code-review round 9, confirmed with `tar tf`). `-C DIR` in a WRITING mode
+    // is the directory archived FROM, so it is a source like any other input.
+    let i = 1;
+    const fromDirs: PositionedArg[] = [];
+    for (const ch of first.value) {
+      if (!TAR_VALUE_LETTERS.includes(ch)) continue;
+      const operand = args[i];
+      // A flag between the key and this slot means the operand is NOT here:
+      // `tar cf - ~/.ssh` writes to stdout, so `-` is the archive and the jailed
+      // directory is an INPUT. That is why the slot must directly follow.
+      if (!operand || operand.afterFlag !== null) break;
+      i += 1;
+      if (ch === 'C') fromDirs.push(operand);
     }
-    return args.slice(i);
+    return [...fromDirs, ...args.slice(i)];
   }
   if (kind === 'zip') return first && first.afterFlag === '-' ? args : args.slice(1);
   if (kind === 'ar') return bareKey ? args.slice(2) : args.slice(1);

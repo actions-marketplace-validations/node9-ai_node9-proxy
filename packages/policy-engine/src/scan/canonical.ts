@@ -549,6 +549,21 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // WALK that `--` ends the options and left the flag-operand EXCUSAL loops behind,
 // so `grep -- -m KEY` excused the credential as `-m`'s operand while GNU grep
 // opened and printed it.
+// /code-review round 9: round 8's two fixes were correct where they landed and
+// the generalisation claim was not. Both mistakes were still live elsewhere, all
+// measured on the real binaries:
+//   - the copy tier excused flag operands PAST `--`: `rsync -- --exclude KEY rdst/`
+//     transferred the key, `tar -c -f o.tar -- --exclude ~/.ssh` archived it,
+//     `cp -t dst -- -t KEY` copied it, each with no finding.
+//   - find treated `--` as its first PREDICATE, so every start point was erased:
+//     `find -- ~/.ssh -type f -exec cat {} +` was silent while the same command
+//     without `--` blocked.
+//   - a BARE tar key consumed exactly one word, so `tar cCf ~/.ssh out.tar .`
+//     gave the jailed directory to the archive slot and dropped it. Each value
+//     letter in the key takes one word, in key order, and `-C DIR` in a writing
+//     mode is the directory archived FROM.
+// Plus a long source flag now resolves by getopt prefix (`az ... --fil KEY`), and
+// rsync's `-z` left the value set, where it never belonged.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -573,7 +588,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '64dedb96843cbf72';
+export const CANONICAL_EXTRACTOR_HASH = '55b4e5daee3b7a9c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
