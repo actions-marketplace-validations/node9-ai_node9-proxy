@@ -423,6 +423,21 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //     from the value set: the engine cannot know which grep is installed.
 //   - an ATTACHED short operand (`grep -fKEY`, `sed -fKEY`) is the third
 //     spelling of one read and was never covered.
+// /code-review round 2 found six more, three of them bypasses introduced by the
+// round-1 fix, and one of them refuted a premise rather than a line of code:
+//   - an UNLISTED value-taking flag handed its own operand to the excused
+//     pattern slot, so `grep --include-from KEY needle notes.txt` opened KEY
+//     under ugrep. "A flag missing from the table only leaves a false positive"
+//     was therefore FALSE. The flag before a candidate word now has THREE
+//     states -- consumes nothing, consumes a word, UNKNOWN -- and unknown
+//     excuses nothing at all. That is what makes the table's incompleteness safe.
+//   - `--binary` is an exact GNU option and was prefix-resolving to
+//     `--binary-files`; `rg --pcre2` to `--pcre2-version`. Both are now listed.
+//   - the attached-operand scan found the `f` inside `-e'config/.env'`; it now
+//     stops at the FIRST argument-taking letter, like the slot rule does.
+//   - a value flag's operand is its ARGUMENT and reads nothing, so it is excused,
+//     except for the flags whose operand IS a file (FILE_OPERAND_FLAGS). Without
+//     that, the headline false positive was fixed in only one of its spellings.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -447,7 +462,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '3382ab4ae56837a6';
+export const CANONICAL_EXTRACTOR_HASH = 'b54cc5e43d241cff';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

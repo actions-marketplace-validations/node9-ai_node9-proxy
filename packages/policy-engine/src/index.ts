@@ -48,6 +48,7 @@ export {
   positionedArgs,
   PATTERN_VERB_NAMES,
   patternShapeOf,
+  fileOperandFlagsOf,
   COPY_VERBS,
   sampleCopyCommand,
   type PositionedArg,

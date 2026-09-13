@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { analyzeFsOperation, PATTERN_VERB_NAMES, patternShapeOf } from '../shell/index';
+import {
+  analyzeFsOperation,
+  PATTERN_VERB_NAMES,
+  patternShapeOf,
+  fileOperandFlagsOf,
+} from '../shell/index';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGE 5a: THE SEARCH-PATTERN SLOT
@@ -95,8 +100,11 @@ describe('stage 5a — a switch flag consumes nothing', () => {
     [`grep -n foo ${K}`],
     [`grep -i foo ${K}`],
     [`grep -rl foo ${D}`],
+    // `--color` consumes NOTHING (optional argument), so `never` is the pattern
+    // and everything after it is a FILE: grep really does open the key here.
     [`grep --color never foo ${K}`],
     [`grep --colour never foo ${K}`],
+    [`grep --color never .env f.txt`],
     [`rg -i foo ${K}`],
     [`rg --json foo ${K}`],
     [`rg -l foo ${D}`],
@@ -182,22 +190,44 @@ describe('stage 5a — an OPTIONAL-argument flag consumes nothing', () => {
   ])('%s', (c) => expect(v(c)).toBe('block'));
 });
 
-// ── 6c. Every value flag's OPERAND is judged, never excused. DERIVED. ────────
-// The guard in block 3 cannot tell a correctly-declared value flag from a
-// wrongly-declared one: `VERB FLAG v foo JAILED` blocks either way, which is how
-// the --group-separator regression shipped green. This row pins the other half --
-// a value flag's own operand stays in the judged set -- and it does discriminate.
-describe('stage 5a — a value flag does not excuse its operand', () => {
-  const rows: Array<[string, string]> = [];
+// ── 6c. What a value flag's OPERAND is, DERIVED from the two tables. ────────
+// Round 1 added this block asserting that a value flag's operand is always
+// JUDGED. That was wrong, and it is the reason round 2 found the headline false
+// positive fixed in only one of its two spellings: `grep --exclude=.env -r x .`
+// ran while `grep --exclude .env -r x .` blocked. A value flag's operand is its
+// ARGUMENT -- a count, an action, a label, an exclusion glob, the pattern -- and
+// is never opened, EXCEPT for the flags whose operand is a file the verb reads.
+// That split is exactly FILE_OPERAND_FLAGS, so both halves are derived from the
+// shipped tables and cannot drift from them.
+describe("stage 5a — a value flag's operand: file or argument", () => {
+  const argRows: Array<[string, string]> = [];
+  const fileRows: Array<[string, string]> = [];
   for (const verb of PATTERN_VERB_NAMES) {
     const shape = patternShapeOf(verb)!;
+    const fileFlags = fileOperandFlagsOf(verb);
     for (const flag of shape.takesValue) {
-      if (shape.patternFlags.has(flag)) continue; // that operand IS the pattern
-      rows.push([verb, flag]);
+      (fileFlags?.has(flag) ? fileRows : argRows).push([verb, flag]);
     }
   }
-  it.each(rows)('%s %s <jailed> foo blocks', (verb, flag) => {
+
+  it('both halves are populated', () => {
+    expect(argRows.length).toBeGreaterThan(40);
+    expect(fileRows.length).toBeGreaterThan(3);
+  });
+
+  // An ARGUMENT operand reads nothing, so a jailed-looking one is excused.
+  it.each(argRows)('%s %s <jailed> foo runs', (verb, flag) => {
+    expect(v(`${verb} ${flag} ${K} foo`)).toBe('null');
+  });
+
+  // A FILE operand is opened, so it is judged wherever it sits.
+  it.each(fileRows)('%s %s <jailed> foo blocks', (verb, flag) => {
     expect(v(`${verb} ${flag} ${K} foo`)).toBe('block');
+  });
+
+  // And the guard that matters either way: the FILE slot is never excused.
+  it.each([...argRows, ...fileRows])('%s %s v foo <jailed> blocks', (verb, flag) => {
+    expect(v(`${verb} ${flag} v foo ${K}`)).toBe('block');
   });
 });
 
