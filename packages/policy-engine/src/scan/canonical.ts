@@ -537,6 +537,18 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // have witnesses: both lone-dash guards, the short-bundle UNKNOWN arm, the
 // ambiguous-abbreviation arm, operandOf's attached-value check, and the in-jail
 // exemption's `every`. Each mutant is re-killed by the row written for it.
+// /code-review round 8: the round-7 bundle fix was applied to the target-directory
+// flag only, and the same wrong model was still live for skipFlags. Measured with
+// `tar tf` and `unzip -l`: `tar -f out.tar -cVconf KEY` and `zip out.zip -rPx KEY`
+// archive the credential and produced no finding, because the bundle was named by
+// its LAST letter. Every copy verb with short value flags now declares them, and a
+// DERIVED spec row pins that the two tables agree (a letter that names an operand
+// to skip must also be known to take one) -- which immediately caught `7z`'s
+// inline-only `-x` and zip's missing `-x`/`-i`.
+// The pattern slot had one more `--` hole of the same family: round 5 taught the
+// WALK that `--` ends the options and left the flag-operand EXCUSAL loops behind,
+// so `grep -- -m KEY` excused the credential as `-m`'s operand while GNU grep
+// opened and printed it.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -561,7 +573,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'b042bcd2276064dd';
+export const CANONICAL_EXTRACTOR_HASH = '64dedb96843cbf72';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

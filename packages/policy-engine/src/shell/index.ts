@@ -948,6 +948,16 @@ export const fileOperandFlagsOf = (verb: string): Set<string> | undefined =>
 // ALLOW (/code-review round 1). Judging globs would mean expanding them, which
 // this tier cannot do; recorded as a known gap rather than claimed closed.
 const GREP_FILE_OPERANDS = new Set(['-f', '--file', '--exclude-from', '--include']);
+// Short options that take an argument, for the readers that have no PatternShape.
+// Without them the attached-operand scan walked to any `f`, so
+// `awk -vfile=/home/u/.ssh/config 'BEGIN{}'` -- where `-v` owns the rest of the
+// token and nothing is opened -- was a hard block (/code-review round 8).
+const READER_VALUE_LETTERS: Record<string, string[]> = {
+  awk: ['F', 'v', 'f'],
+  gawk: ['F', 'v', 'f', 'e', 'E', 'i', 'l', 'o', 'p', 'D'],
+  sed: ['e', 'f', 'i', 'l'],
+  sort: ['C', 'k', 'o', 'S', 't', 'T'],
+};
 const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
   grep: GREP_FILE_OPERANDS,
   egrep: GREP_FILE_OPERANDS,
@@ -1033,6 +1043,17 @@ interface CopyShape {
 }
 
 const SCP_VALUE_FLAGS = ['i', 'F', 'o', 'c', 'S', 'P', 'J', 'D', 'W', 'l'];
+// Short options that take an argument, per verb's own --help on this machine
+// (GNU tar 1.35, Info-ZIP, rsync 3.x). /code-review round 8: without these, a
+// bundle was named by its LAST letter, so `tar -f out.tar -cVconf KEY` looked like
+// tar's `-f` and the credential was dropped as that flag's operand -- measured, the
+// key really is archived. The FIRST value letter owns the rest of the token.
+const TAR_VALUE_LETTERS = ['b', 'C', 'f', 'F', 'g', 'H', 'I', 'K', 'L', 'N', 'T', 'V', 'X'];
+// `x` and `i` are here as well as in zip's skipFlags: a letter that names an
+// operand to SKIP must also be known to TAKE one, or the skip silently stops
+// working. jail-copy.spec.ts derives a row from exactly that invariant.
+const ZIP_VALUE_LETTERS = ['b', 'n', 'P', 't', 's', 'O', 'x', 'i'];
+const RSYNC_VALUE_LETTERS = ['e', 'f', 'T', 'B', 'M', 'z'];
 const RSYNC_SKIP = [
   'e',
   '--rsh',
@@ -1055,16 +1076,31 @@ export const COPY_VERBS: Record<string, CopyShape> = {
   mv: { source: 'allButLast', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
   install: { source: 'allButLast', targetDirFlag: true, valueLetters: INSTALL_VALUE_LETTERS },
   ln: { source: 'first', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
-  scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS },
-  rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP },
+  scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS, valueLetters: SCP_VALUE_FLAGS },
+  rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP, valueLetters: RSYNC_VALUE_LETTERS },
   tar: {
     source: 'archive',
     archive: 'tar',
     skipFlags: ['f', 'X', 'T', '--file', '--exclude', '--exclude-from', '--files-from'],
+    valueLetters: TAR_VALUE_LETTERS,
   },
-  zip: { source: 'archive', archive: 'zip', skipFlags: ['x', 'i', '--exclude', '--include'] },
+  zip: {
+    source: 'archive',
+    archive: 'zip',
+    skipFlags: ['x', 'i', '--exclude', '--include'],
+    valueLetters: ZIP_VALUE_LETTERS,
+  },
   ar: { source: 'archive', archive: 'ar' },
-  '7z': { source: 'archive', archive: '7z', skipFlags: ['x', '--exclude'] },
+  // 7z switches are INLINE only (`-mx9`, `-px`, `-x!pat`), so no following word is
+  // ever a switch's operand: an empty valueLetters keeps `7z a out.7z -mx KEY`
+  // from dropping the credential as `-x`'s operand (/code-review round 8).
+  // 7z switches are INLINE only (`-mx9`, `-px`, `-x!pat`), so no following word is
+  // ever a switch's operand -- which is why the short `x` is NOT a skipFlag here
+  // and valueLetters is empty. Keeping the short `x` made `7z a out.7z -mx KEY`
+  // drop the credential as an exclusion operand (/code-review round 8), and the
+  // derived "every skipped letter is a value letter" row in jail-copy.spec.ts is
+  // what keeps the two tables honest about it.
+  '7z': { source: 'archive', archive: '7z', skipFlags: ['--exclude'], valueLetters: [] },
   gzip: { source: 'all' },
   bzip2: { source: 'all' },
   xz: { source: 'all' },
@@ -2685,9 +2721,28 @@ function flagIs(w: string | null, names: string[]): boolean {
 }
 
 /** A slot whose preceding flag names it as an operand that is not a source. */
-function operandOf(a: PositionedArg, names: string[] | undefined): boolean {
+function operandOf(
+  a: PositionedArg,
+  names: string[] | undefined,
+  valueLetters?: string[]
+): boolean {
   if (!names || a.afterFlag === null) return false;
-  return flagIs(a.afterFlag, names) && flagInfo(a.afterFlag).attached === null;
+  const w = a.afterFlag;
+  // A SHORT bundle is named by its first ARGUMENT-TAKING letter, which also owns
+  // the rest of the token: `-cVconf` is `-c -V conf`, not a bundle ending in `-f`.
+  // Naming it by the last letter made `tar -f out.tar -cVconf ~/.ssh/id_rsa` drop
+  // the credential as tar's `-f` operand while really archiving it
+  // (/code-review round 8, measured with `tar tf`).
+  if (!w.startsWith('--') && valueLetters) {
+    const letters = w.slice(1);
+    for (let i = 0; i < letters.length; i++) {
+      if (!valueLetters.includes(letters[i])) continue;
+      // Only the LAST letter takes the next word; an earlier one ate the token.
+      return i === letters.length - 1 && names.includes(letters[i]);
+    }
+    return false;
+  }
+  return flagIs(w, names) && flagInfo(w).attached === null;
 }
 
 /**
@@ -2762,7 +2817,7 @@ function copySourcePaths(words: (string | null)[]): string[] {
   const { shape, last } = r;
   const args = positionedArgs(words, last + 1);
   const tail = words.slice(last + 1);
-  const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags);
+  const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags, shape.valueLetters);
   // `-t DIR` and its ATTACHED and ABBREVIATED spellings. flagInfo reads a short
   // bundle's LAST letter, so `-ttmp` gave letter `p` and the destination flag went
   // unseen: `cp -ttmp ~/.ssh/id_rsa` produced no finding at all while `cp -t tmp
@@ -2845,11 +2900,7 @@ function copySourcePaths(words: (string | null)[]): string[] {
         .map((f) => f.attached as string);
       return [
         ...args
-          .filter(
-            (a) =>
-              flagIs(a.afterFlag, shape.sourceFlags ?? []) &&
-              flagInfo(a.afterFlag as string).attached === null
-          )
+          .filter((a) => operandOf(a, shape.sourceFlags, shape.valueLetters))
           .map((a) => a.value),
         ...inline,
       ];
@@ -3176,8 +3227,14 @@ function readTargets(
   // fixed in only one of its two spellings: `grep --exclude=.env -r x .` ran
   // while `grep --exclude .env -r x .` blocked (/code-review round 2).
   const fileFlags = FILE_OPERAND_FLAGS[verb];
+  // Past `--` nothing is a flag, so no word there is a flag's operand. Round 5
+  // taught the pattern WALK that and left these loops behind: `grep -- -m KEY`
+  // excused the credential as `-m`'s operand while GNU grep opened and printed it
+  // (/code-review round 8).
+  const optionsEnd = words.findIndex((w, i) => i >= from && w === '--');
+  const pastOptions = (a: PositionedArg) => optionsEnd >= 0 && a.argv > optionsEnd;
   for (const a of args) {
-    if (a.afterFlag === null) continue;
+    if (a.afterFlag === null || pastOptions(a)) continue;
     const e = flagEffect(a.afterFlag, shape, known);
     if (e.kind !== 'takes') continue;
     if (fileFlags && namesFlag(e.flag, fileFlags, known)) continue; // a FILE: judge it
@@ -3208,7 +3265,8 @@ function readTargets(
       const w = words[i];
       if (w === null) return -1;
       if (w === '--') return i + 1;
-      if (w.startsWith('-') && w !== '-') {
+      // `-` and `--` are handled above; every other dash word is a flag.
+      if (w.startsWith('-')) {
         const e = flagEffect(w, shape, known);
         if (e.kind === 'takes') i += 1;
         else if (e.kind === 'unknown') return -1;
@@ -3276,7 +3334,10 @@ function flagOperandFiles(verb: string, words: (string | null)[], from: number):
     for (let j = 0; j < letters.length; j++) {
       const name = `-${letters[j]}`;
       const isFileFlag = flags.has(name);
-      const argTaking = isFileFlag || (shape?.takesValue.has(name) ?? false);
+      const argTaking =
+        isFileFlag ||
+        (shape?.takesValue.has(name) ?? false) ||
+        (READER_VALUE_LETTERS[verb] ?? []).includes(letters[j]);
       if (!argTaking) continue;
       const attached = letters.slice(j + 1);
       if (isFileFlag && attached) out.push(attached);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { analyzeFsOperation } from '../shell/index';
+import { COPY_VERBS, analyzeFsOperation } from '../shell/index';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGE 4: COPY VERBS, GUARDED BY POSITION
@@ -286,6 +286,22 @@ describe('stage 4 — round 3', () => {
 // the SAME directory is a rename, and a jailed source going anywhere else is the
 // credential leaving.
 // ─────────────────────────────────────────────────────────────────────────────
+describe('every skipped short letter must also be a value letter (derived)', () => {
+  // The two tables have to agree: `skipFlags` says "this flag's operand is not a
+  // source" and `valueLetters` says "this letter takes an operand at all". A
+  // letter in the first but not the second stops skipping silently -- which is
+  // how `zip -r out.zip . -x .env` began to review when valueLetters arrived
+  // (/code-review round 8, caught by this suite before it shipped).
+  it.each(Object.entries(COPY_VERBS))('%s', (_verb, shape) => {
+    const shortSkips = (shape.skipFlags ?? []).filter((f) => !f.startsWith('--'));
+    if (shortSkips.length === 0 || shape.valueLetters === undefined) return;
+    for (const letter of shortSkips)
+      expect(shape.valueLetters, `${_verb} skips -${letter} but does not list it`).toContain(
+        letter
+      );
+  });
+});
+
 describe('the copy tier arms that had no witness (round 7 mutation sweep)', () => {
   const K4 = '/home/u/.ssh/id_rsa';
   const D4 = '/home/u/.ssh';
