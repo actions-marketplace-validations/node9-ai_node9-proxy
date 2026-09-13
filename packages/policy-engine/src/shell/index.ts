@@ -496,6 +496,152 @@ export const FS_READ_TOOLS = new Set([
 // listed here keeps its bypass. That is the state today, not a regression, but it
 // is not closed either. `rsync --files-from=` opens the file too and is NOT here:
 // rsync is not a reader, it belongs to the copy and network tiers (follow-up).
+// ── Stage 5a: the SEARCH-PATTERN slot ───────────────────────────────────────
+// `grep -n .env .gitignore` was a hard block, and so were `rg "\.env\.local"`
+// and `grep -rn ".ssh/config" docs/`. None reads a credential: each hands the
+// jail name to a reader as its search PATTERN, and the read tier judged every
+// positional word of a reader as a path. Stage 3 kept the slot each word sits in
+// precisely so this could be separated; stage 4 consumed position for copy verbs
+// and this is the second consumer.
+//
+// A word is excused by its SLOT, never by its SHAPE. `grep -rn ".ssh/config"
+// docs/` is excused while carrying a word that looks exactly like a rooted
+// credential path, and `grep -rn foo ~/.ssh/config` blocks on the same string
+// one slot over. The shape-based repairs stage 1 measured and rejected (see
+// SENSITIVE_PATH_RULES above) stay rejected.
+//
+// FOUR verbs, and the limit is evidence, not taste. Every flag below was
+// verified on a real binary with a behavioural discriminator: run
+// `VERB FLAG value foo` on stdin, and if the flag consumes `value` then `foo` is
+// the pattern, while if it consumes nothing then `value` is the pattern and
+// `foo` becomes a FILE ("No such file or directory") -- which is the bypass
+// shape itself, directly observable. That run REFUTED one draft entry:
+// `grep --color WHEN` consumes NOTHING (`--color[=WHEN]`, an optional argument,
+// and GNU getopt_long never takes a separate word for one), while `rg --color`
+// DOES. One table per verb is therefore mandatory, and any help-text operand in
+// square brackets belongs in the no-value set.
+//
+// `ag` and `ack` are deliberately ABSENT: neither is installed on the measuring
+// machine, so neither table could be earned, and this work runs on measurement
+// rather than recall. They keep their false positives. `sed`/`awk`/`gawk` are
+// absent for a stronger reason -- their program slot can READ A FILE from inside
+// itself (`awk 'BEGIN{while((getline l<"KEY")>0)print l}'`, `sed -n 'r KEY'`), so
+// excusing it turned an exfil-corpus row into a bypass in the prototype run.
+// They need an in-program file grammar first (stage 5b). Do not add them here.
+//
+// The unsafe direction, stated before the table: a flag WRONGLY listed as
+// value-taking swallows the pattern and excuses the FILE. So every entry has a
+// generated control row in jail-pattern-slot.spec.ts of the shape
+// `VERB FLAG v foo JAILED -> block`. A flag MISSING from the table only leaves a
+// false positive, which is the safe direction.
+interface PatternShape {
+  /** Every flag that consumes the next word (so that word is not the pattern). */
+  takesValue: Set<string>;
+  /** Flags whose operand IS the search pattern. */
+  patternFlags: Set<string>;
+  /** Flags after which NO positional pattern is expected (pattern from a file,
+   *  or a listing mode). */
+  noPatternFlags: Set<string>;
+}
+const GREP_SHAPE: PatternShape = {
+  takesValue: new Set([
+    '-A',
+    '-B',
+    '-C',
+    '-m',
+    '-d',
+    '-D',
+    '-e',
+    '-f',
+    '--after-context',
+    '--before-context',
+    '--context',
+    '--max-count',
+    '--directories',
+    '--devices',
+    '--label',
+    '--binary-files',
+    '--include',
+    '--exclude',
+    '--exclude-from',
+    '--exclude-dir',
+    '--group-separator',
+    '--regexp',
+    '--file',
+  ]),
+  patternFlags: new Set(['-e', '--regexp']),
+  noPatternFlags: new Set(['-f', '--file']),
+};
+const PATTERN_VERBS: Record<string, PatternShape> = {
+  grep: GREP_SHAPE,
+  // /usr/bin/egrep and /usr/bin/fgrep are 41-byte shell wrappers that exec
+  // `grep -E` and `grep -F`. Read in full, not assumed.
+  egrep: GREP_SHAPE,
+  fgrep: GREP_SHAPE,
+  rg: {
+    takesValue: new Set([
+      '-A',
+      '-B',
+      '-C',
+      '-d',
+      '-E',
+      '-e',
+      '-f',
+      '-g',
+      '-j',
+      '-M',
+      '-m',
+      '-r',
+      '-t',
+      '-T',
+      '--after-context',
+      '--before-context',
+      '--context',
+      '--context-separator',
+      '--color',
+      '--colors',
+      '--dfa-size-limit',
+      '--regex-size-limit',
+      '--max-filesize',
+      '--encoding',
+      '--engine',
+      '--field-context-separator',
+      '--field-match-separator',
+      '--glob',
+      '--iglob',
+      '--ignore-file',
+      '--generate',
+      '--hostname-bin',
+      '--hyperlink-format',
+      '--max-columns',
+      '--max-count',
+      '--max-depth',
+      '--path-separator',
+      '--pre',
+      '--pre-glob',
+      '--replace',
+      '--sort',
+      '--sortr',
+      '--threads',
+      '--type',
+      '--type-add',
+      '--type-clear',
+      '--type-not',
+      '--regexp',
+      '--file',
+    ]),
+    patternFlags: new Set(['-e', '--regexp']),
+    // `--files` and `--type-list` list or enumerate without a pattern. Note the
+    // founder decision of 2026-09-13: `rg --files ~/.ssh` stays BLOCKED, which
+    // this achieves by leaving the directory in the judged list.
+    noPatternFlags: new Set(['-f', '--file', '--files', '--type-list', '--pcre2-version']),
+  },
+};
+/** Exported so the spec DERIVES its control rows from the table rather than
+ *  hand-writing them: a flag added here gains a row for free. */
+export const PATTERN_VERB_NAMES = Object.keys(PATTERN_VERBS);
+export const patternShapeOf = (verb: string): PatternShape | undefined => PATTERN_VERBS[verb];
+
 const GREP_FILE_OPERANDS = new Set(['-f', '--file', '--exclude-from', '--include']);
 const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
   grep: GREP_FILE_OPERANDS,
@@ -2070,7 +2216,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         return result?.verdict !== 'block';
       }
       if (nodeType !== 'CallExpr') return true;
-      const { name, flags, paths, words } = extractLiteralArgs(n);
+      const { name, flags, paths, words, args } = extractLiteralArgs(n);
       if (!name) return true;
 
       // rm with -r and -f (any combination, e.g. -rf, -fr, -r -f)
@@ -2122,7 +2268,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
       // wrapper, or as find's -exec action.
       const readPaths = FS_READ_TOOLS.has(name)
-        ? [...paths, ...flagOperandFiles(name, words, 1)]
+        ? [...readTargets(name, args, flags), ...flagOperandFiles(name, words, 1)]
         : wrappedReadPaths(words, name);
       if (readPaths) {
         for (const p of readPaths) {
@@ -2471,6 +2617,72 @@ const positionalAfter = (words: (string | null)[], from: number, to = words.leng
  * first word after the verb, so a wrapped read (`sudo grep --file=KEY`) is
  * scanned from the unwrapped head and not from argv[0].
  */
+/** The flag NAMES a token carries: `--file=x` -> ['--file'], `-rnf` -> ['-r','-n','-f']. */
+function flagNamesOf(token: string): string[] {
+  if (token.startsWith('--')) {
+    const eq = token.indexOf('=');
+    return [eq > 0 ? token.slice(0, eq) : token];
+  }
+  return token
+    .slice(1)
+    .split('')
+    .map((c) => `-${c}`);
+}
+
+/**
+ * The flag that consumes the word AFTER this token, or null.
+ *
+ * A short bundle consumes the next word only when its argument-taking letter is
+ * LAST: an earlier one swallows the rest of the token instead, so `grep -en foo`
+ * reads `n` as -e's pattern and `foo` is a FILE. An `=` token carries its own
+ * value and consumes nothing. Both spellings fail in the UNSAFE direction if
+ * treated naively, and both are pinned in jail-pattern-slot.spec.ts.
+ */
+function consumesNextWord(token: string, shape: PatternShape): string | null {
+  if (token.startsWith('--')) {
+    if (token.includes('=')) return null;
+    return shape.takesValue.has(token) ? token : null;
+  }
+  const letters = token.slice(1);
+  for (let i = 0; i < letters.length; i++) {
+    const name = `-${letters[i]}`;
+    if (shape.takesValue.has(name)) return i === letters.length - 1 ? name : null;
+  }
+  return null;
+}
+
+/**
+ * Stage 5a: the words of a reader that the jail should judge -- every positional
+ * MINUS the one the verb's grammar names as the search pattern. A verb outside
+ * PATTERN_VERBS gets every positional, exactly as before this stage.
+ *
+ * Never excuses more than one word, and excuses by SLOT rather than by shape.
+ * When the pattern arrived from anywhere but a positional slot -- a flag operand,
+ * a bundle, an `=` token, a pattern FILE -- every positional is a file and
+ * nothing is excused except that flag's own operand.
+ */
+function readTargets(verb: string, args: PositionedArg[], flags: string[]): string[] {
+  const shape = PATTERN_VERBS[verb];
+  if (!shape) return args.map((a) => a.value);
+  const names = flags.flatMap(flagNamesOf);
+  const patternElsewhere = names.some(
+    (n) => shape.patternFlags.has(n) || shape.noPatternFlags.has(n)
+  );
+  const excused = new Set<PositionedArg>();
+  for (const a of args) {
+    if (a.afterFlag === null) continue;
+    const c = consumesNextWord(a.afterFlag, shape);
+    if (c !== null && shape.patternFlags.has(c)) excused.add(a);
+  }
+  if (!patternElsewhere) {
+    const slot = args.find(
+      (a) => a.afterFlag === null || consumesNextWord(a.afterFlag, shape) === null
+    );
+    if (slot) excused.add(slot);
+  }
+  return args.filter((a) => !excused.has(a)).map((a) => a.value);
+}
+
 function flagOperandFiles(verb: string, words: (string | null)[], from: number): string[] {
   const flags = FILE_OPERAND_FLAGS[verb];
   if (!flags) return [];
@@ -2513,7 +2725,12 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
   const h = unwrapCommandHead(words);
   if (h <= 0 || !isReaderWord(words[h] ?? null)) return null;
   const head = baseWord(words[h]);
-  return [...positionalAfter(words, h + 1), ...flagOperandFiles(head, words, h + 1)];
+  const rest = words.slice(h + 1);
+  const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
+  return [
+    ...readTargets(head, positionedArgs(words, h + 1), restFlags),
+    ...flagOperandFiles(head, words, h + 1),
+  ];
 }
 
 /**

@@ -30,6 +30,7 @@ import {
   FS_READ_TOOLS,
   COMMAND_WRAPPERS,
   COPY_VERBS as ENGINE_COPY_VERBS,
+  PATTERN_VERB_NAMES,
   sampleCopyCommand,
   analyzeFsOperation,
 } from '@node9/policy-engine';
@@ -216,6 +217,62 @@ describe('jail gauntlet — the verb axis, derived from FS_READ_TOOLS', () => {
     });
   }
 });
+
+/**
+ * ⭐ STAGE 5a: THE PATTERN-VERB AXIS, against the BUILT-IN baseline.
+ *
+ * The reader axis above runs against a USER jail (`jail add`), whose rule is a
+ * verb-agnostic regex over the raw command. That rule fires whatever the slot,
+ * so it CANNOT witness stage 5a: a pattern verb passes it either way. This block
+ * uses `~/.ssh/id_rsa` with nothing configured, so only the built-in AST tier
+ * can answer, and asserts BOTH directions per verb:
+ *
+ *   VERB foo <jailed file>   must BLOCK   the file slot, a real read
+ *   VERB <jailed string> f   must RUN     the pattern slot, a search
+ *
+ * DERIVED from the engine's own `PATTERN_VERB_NAMES`, so a verb added to the
+ * table is exercised end to end without anyone remembering this file. The second
+ * direction is the one that pays for the comparison page: `grep -n '.env'
+ * .gitignore` is the single most common `.env` command in a repo.
+ *
+ * ⚠️ WINDOWS skipped for the reason pinned at the engine-level block below:
+ * mvdan eats `\` as a POSIX escape, so the built-in jail never fires there.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 5a: the pattern-verb axis, derived from PATTERN_VERB_NAMES',
+  () => {
+    for (const verb of [...PATTERN_VERB_NAMES].sort()) {
+      it(`\`${verb}\` reading a jailed FILE is blocked`, () => {
+        const { home } = jailedHome();
+        const ssh = path.join(home, '.ssh');
+        fs.mkdirSync(ssh, { recursive: true });
+        const r = probe(home, 'Bash', {
+          command: `${verb} needle ${path.join(ssh, 'id_rsa')}`,
+        });
+        expect(r.verdict, `${verb} on a jailed file is a read`).toBe('block');
+      });
+
+      it(`\`${verb}\` SEARCHING FOR the jail name still runs`, () => {
+        const { home } = jailedHome();
+        fs.writeFileSync(path.join(home, 'notes.txt'), 'x\n');
+        const r = probe(home, 'Bash', {
+          command: `${verb} .env ${path.join(home, 'notes.txt')}`,
+        });
+        expect(r.verdict, `${verb} searching for the STRING reads no credential`).toBe('allow');
+      });
+    }
+
+    it('CONTROL: the same string one slot over still blocks', () => {
+      const { home } = jailedHome();
+      const ssh = path.join(home, '.ssh');
+      fs.mkdirSync(ssh, { recursive: true });
+      const r = probe(home, 'Bash', { command: `grep -rn ${path.join(ssh, 'config')} docs/` });
+      expect(r.verdict, 'the pattern slot is excused by SLOT, not by shape').toBe('allow');
+      const r2 = probe(home, 'Bash', { command: `grep -rn foo ${path.join(ssh, 'config')}` });
+      expect(r2.verdict, 'and the file slot is not').toBe('block');
+    });
+  }
+);
 
 /** Build a command that MOVES rather than prints, per verb. */
 function copyCmd(verb: string, src: string): string {

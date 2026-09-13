@@ -380,8 +380,40 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Verdict snapshot over 390 corpus commands: 0 moved -- no corpus row used an
 // `=` spelling, which is exactly why the bypass survived four stages.
 //
-// Half two lands in this same version before release: the pattern SLOT, so a
-// search pattern is no longer read as a path. See doc/jail-stage5-pattern-slot-design.md.
+// Half two, stage 5a: the search-PATTERN slot. `grep -n '.env' .gitignore` was a
+// hard block, and so were `rg "\.env\.local"` and `grep -rn ".ssh/config"
+// docs/`. None reads a credential: each hands the jail name to a reader as its
+// search pattern, and the read tier judged every positional word of a reader as
+// a path. Stage 3 kept the slot for exactly this. FOUR verbs (grep, egrep,
+// fgrep, rg), each flag verified on a real binary; sed and awk are excluded
+// because their program slot can read a file from inside itself. Measured
+// through extractCanonicalFindings:
+//
+//   command                                v14                 v15
+//   grep -n '.env' .gitignore            block/critical  ->  (none)
+//   rg "\.env\.local"                    block/critical  ->  (none)
+//   rg .env src/                         block/critical  ->  (none)
+//   grep -e .env f.txt                   block/critical  ->  (none)
+//   grep -A 3 .env f.txt                 block/critical  ->  (none)
+//   grep -rn "~/.ssh" docs/              block/critical  ->  (none)
+//   grep -rn ".ssh/config" docs/         block/critical  ->  (none)
+//   rg --files-with-matches ".env" .     block/critical  ->  (none)
+//   grep -rn "credentials.json" src/     review/critical ->  (none)
+//   grep ~/.ssh/id_rsa                   block/critical  ->  (none)  stdin search
+//   grep -n foo KEY                      block   ->  block   the FILE slot
+//   grep -r TODO ~/.ssh                  block   ->  block
+//   grep -f KEY f.txt                    block   ->  block   patterns FROM the key
+//   grep -rnf KEY f.txt                  block   ->  block   the same, bundled
+//   grep -en KEY                         block   ->  block   -e not last: KEY is a FILE
+//   rg --files ~/.ssh                    block   ->  block   founder decision
+//   grep --color never foo KEY           block   ->  block   --color consumes NOTHING
+//   cat KEY                              block   ->  block   (control)
+//   sed -i s/.aws/x/ f.txt               block   ->  block   stage 5b, still an FP
+//
+// Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
+// legitimate-use corpus already marks as false positives, 0 attack rows, 0
+// loosened in the file slot. The last row is the honest residue: sed and awk
+// keep their false positive until stage 5b gives them an in-program file grammar.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
@@ -402,7 +434,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '13416ff1132c5379';
+export const CANONICAL_EXTRACTOR_HASH = '5e7d4b85ac024aa5';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

@@ -46,6 +46,8 @@ export {
   COMMAND_WRAPPERS,
   NET_BINARIES,
   positionedArgs,
+  PATTERN_VERB_NAMES,
+  patternShapeOf,
   COPY_VERBS,
   sampleCopyCommand,
   type PositionedArg,

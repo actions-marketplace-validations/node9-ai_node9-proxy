@@ -1,0 +1,177 @@
+import { describe, it, expect } from 'vitest';
+import { analyzeFsOperation, PATTERN_VERB_NAMES, patternShapeOf } from '../shell/index';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGE 5a: THE SEARCH-PATTERN SLOT
+//
+// `grep -n .env .gitignore` was a hard block. So were `rg "\.env\.local"` and
+// `grep -rn ".ssh/config" docs/`. None of them reads a credential: each hands
+// the jail name to a reader as its search PATTERN, and the read tier judged
+// every positional word of a reader as a path.
+//
+// A word is excused by its SLOT, never by its SHAPE. The two rows at the bottom
+// of this file are the proof: the same string `<HOME>/.ssh/config` is excused in
+// the pattern slot and blocked one slot over.
+//
+// Four verbs only. `ag`/`ack` are absent because neither is installed on the
+// measuring machine and no table could be earned; `sed`/`awk` are absent because
+// their program slot can read a file from inside itself (awk getline, sed `r`),
+// which the prototype run showed turns an exfil-corpus row into a bypass.
+// Design: doc/jail-stage5-pattern-slot-design.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const K = '/home/u/.ssh/id_rsa';
+const D = '/home/u/.ssh';
+const E = '/home/u/project/.env';
+const v = (c: string) => {
+  const r = analyzeFsOperation(c);
+  return r ? r.verdict : 'null';
+};
+
+// ── 1. Controls. Green before this stage and after it. ───────────────────────
+describe('stage 5a — controls: a jailed file in a FILE slot still blocks', () => {
+  it.each([
+    [`grep -n foo ${K}`],
+    [`grep -r TODO ${D}`],
+    [`grep -e foo ${K}`],
+    [`rg foo /home/u/.aws/credentials`],
+    [`grep foo < ${K}`],
+    [`sudo grep foo ${K}`],
+    [`grep -f ${K} f.txt`],
+    [`cat ${E}`],
+    [`grep TODO ${E}`],
+    [`grep -rn TODO ${D}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+});
+
+// ── 2. The false positives this stage exists to remove. RED before. ──────────
+describe('stage 5a — a search pattern is not a path', () => {
+  it.each([
+    [`grep -n ".env" .gitignore`],
+    [`grep -n '.env' .gitignore`],
+    [`rg "\\.env\\.local"`],
+    [`rg \\.env\\.local`],
+    [`rg .env src/`],
+    [`grep -e .env f.txt`],
+    [`rg -e .env src/`],
+    [`grep -rn ".ssh/config" docs/`],
+    [`grep -rn "~/.ssh/config" docs/`],
+    [`grep -A 3 .env f.txt`],
+    [`rg -g "*.ts" .env src/`],
+    [`rg --files-with-matches ".env" .`],
+    [`grep -rn ".aws/credentials" docs/`],
+  ])('%s', (c) => expect(v(c)).toBe('null'));
+
+  it('the bare token and the rooted spelling are both excused in the slot', () => {
+    expect(v(`grep -r .ssh /home/u/p`)).toBe('null');
+    expect(v(`rg ${D} src/`)).toBe('null');
+  });
+});
+
+// ── 3. Every value-taking flag gets a control row, DERIVED from the table. ───
+// A flag wrongly listed as value-taking swallows the pattern and excuses the
+// FILE. This block is the guard against that, and it grows by itself when a flag
+// is added to the table.
+describe('stage 5a — a value flag must not swallow the pattern', () => {
+  const rows: Array<[string, string]> = [];
+  for (const verb of PATTERN_VERB_NAMES) {
+    const shape = patternShapeOf(verb)!;
+    for (const flag of shape.takesValue) {
+      // A pattern flag's operand IS the pattern, and a no-pattern flag means
+      // there is none: both are exercised in block 5, not here.
+      if (shape.patternFlags.has(flag) || shape.noPatternFlags.has(flag)) continue;
+      rows.push([verb, flag]);
+    }
+  }
+  it('the table yields control rows', () => expect(rows.length).toBeGreaterThan(40));
+  it.each(rows)('%s %s v foo <jailed> blocks', (verb, flag) => {
+    expect(v(`${verb} ${flag} v foo ${K}`)).toBe('block');
+  });
+});
+
+// ── 4. A switch NOT in the table must not swallow anything. ──────────────────
+describe('stage 5a — a switch flag consumes nothing', () => {
+  it.each([
+    [`grep -n foo ${K}`],
+    [`grep -i foo ${K}`],
+    [`grep -rl foo ${D}`],
+    [`grep --color never foo ${K}`],
+    [`grep --colour never foo ${K}`],
+    [`rg -i foo ${K}`],
+    [`rg --json foo ${K}`],
+    [`rg -l foo ${D}`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+});
+
+// ── 5. Pattern flags and no-pattern flags. ───────────────────────────────────
+describe('stage 5a — the pattern can arrive by flag', () => {
+  it('a pattern flag operand is excused, and the positional is judged', () => {
+    expect(v(`grep -e .env f.txt`)).toBe('null');
+    expect(v(`grep -e foo ${K}`)).toBe('block');
+    expect(v(`grep --regexp .env f.txt`)).toBe('null');
+    expect(v(`grep --regexp foo ${K}`)).toBe('block');
+  });
+
+  it('a no-pattern flag means every positional is a FILE', () => {
+    expect(v(`grep -f patterns.txt ${K}`)).toBe('block');
+    expect(v(`grep -f ${K} f.txt`)).toBe('block');
+    // Founder decision 2026-09-13: --files stays BLOCKED on a jailed directory.
+    expect(v(`rg --files ${D}`)).toBe('block');
+    expect(v(`rg --type-list ${D}`)).toBe('block');
+  });
+});
+
+// ── 6. The bypass surfaces: bundles and the `=` form. ────────────────────────
+// Each of these looks like "the positional is the pattern" to a naive test and
+// is in fact a FILE the verb opens.
+describe('stage 5a — bundled and `=` spellings must not excuse a file', () => {
+  it('a bundled no-pattern flag: -f inside -rnf', () => {
+    expect(v(`grep -rnf ${K} f.txt`)).toBe('block');
+  });
+
+  it('a pattern flag NOT last in the bundle takes its value from the token', () => {
+    // getopt reads `n` as -e's pattern, so KEY is a FILE.
+    expect(v(`grep -en ${K}`)).toBe('block');
+  });
+
+  it('the pattern arrived inside an `=` token, so the positional is a FILE', () => {
+    expect(v(`grep --regexp=foo ${K}`)).toBe('block');
+    expect(v(`rg --file=patterns.txt ${K}`)).toBe('block');
+  });
+
+  it('a bundled pattern flag that IS last still excuses its operand', () => {
+    expect(v(`grep -rne .env f.txt`)).toBe('null');
+  });
+});
+
+// ── 7. Reached through a wrapper: the same table. ────────────────────────────
+describe('stage 5a — the wrapped read sees the same slots', () => {
+  it.each([
+    [`sudo grep .env f.txt`, 'null'],
+    [`env FOO=1 grep -A 3 .env f.txt`, 'null'],
+    [`sudo grep foo ${K}`, 'block'],
+    [`env FOO=1 grep foo ${K}`, 'block'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+// ── 8. stdin, and the one row founder decision 2 settled. ───────────────────
+describe('stage 5a — a reader with no file operand', () => {
+  it('searches stdin for the string, so the word is the pattern', () => {
+    // Founder decision 2026-09-13: accepted. The two ways stdin could BE the
+    // key are owned by tiers that run before this branch, asserted next.
+    expect(v(`grep ${K}`)).toBe('null');
+  });
+
+  it('and the two stdin routes still block', () => {
+    expect(v(`grep x < ${K}`)).toBe('block');
+    expect(v(`cat ${K} | grep x`)).toBe('block');
+  });
+});
+
+// ── 9. Slot, not shape. The whole stage in two rows. ────────────────────────
+describe('stage 5a — the same string, one slot apart', () => {
+  it('excused in the pattern slot, blocked in the file slot', () => {
+    expect(v(`grep -rn ${D}/config docs/`)).toBe('null');
+    expect(v(`grep -rn foo ${D}/config`)).toBe('block');
+  });
+});
