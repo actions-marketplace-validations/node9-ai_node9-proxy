@@ -509,6 +509,20 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //   - the size-based table pin missed a SAME-SIZE swap (`--label` and
 //     `--initial-tab` traded sets, 1887 tests green, `grep --initial-tab pat KEY`
 //     flipped to allow). The pin now hashes the sorted CONTENTS of both sets.
+// /code-review round 6: the single walk HELD against a 12,631-row differential
+// corpus (every flag in both tables crossed with `--`, lone `-`, unknown flags,
+// `=` forms, `-NUM`, dynamic words, bundles and attached operands in nine argv
+// shapes). Four remaining fixes, three of them in the copy tier's flag parsing:
+//   - `flagInfo` reads a short bundle's LAST letter, so `cp -ttmp KEY` never saw
+//     the target-directory flag and `mv -tout KEY` mistook the credential for the
+//     target DIRECTORY. Both produced no finding. The first `t` is the flag now.
+//   - `dirOf` of a bare name returned the name, so `mv .env .env.local` began to
+//     prompt while its absolute spelling stayed quiet.
+//   - an `=` token cannot consume the next word in getopt_long or clap, so
+//     returning UNKNOWN for an unrecognised one bought nothing and hard-blocked
+//     `grep --group-separator=--- -A1 .env notes.md`. The VALUE is still judged.
+//   - the UNKNOWN abort had no test row: neutering it left 1995 tests green while
+//     round 2's measured bypass returned. It has its own witness now.
 // Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
@@ -533,7 +547,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '7f436ddb98b7618d';
+export const CANONICAL_EXTRACTOR_HASH = 'e8d1a4647c84d6a1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

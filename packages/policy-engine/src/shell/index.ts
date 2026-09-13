@@ -2746,11 +2746,39 @@ function copySourcePaths(words: (string | null)[]): string[] {
   const args = positionedArgs(words, last + 1);
   const tail = words.slice(last + 1);
   const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags);
+  // `-t DIR` and its ATTACHED and ABBREVIATED spellings. flagInfo reads a short
+  // bundle's LAST letter, so `-ttmp` gave letter `p` and the destination flag went
+  // unseen: `cp -ttmp ~/.ssh/id_rsa` produced no finding at all while `cp -t tmp
+  // ~/.ssh/id_rsa` reviewed (/code-review round 6). For cp/mv/install a `t`
+  // anywhere in a short bundle IS --target-directory, and the long form resolves
+  // by getopt prefix like every other long flag.
+  const isTargetDirFlag = (w: string): boolean => {
+    if (w.startsWith('--')) {
+      const name = w.includes('=') ? w.slice(0, w.indexOf('=')) : w;
+      return name.length >= 3 && '--target-directory'.startsWith(name);
+    }
+    return /^-[a-zA-Z]*t/.test(w);
+  };
   const targetDir =
     shape.targetDirFlag === true &&
-    tail.some((w) => w !== null && w.startsWith('-') && flagIs(w, ['t', '--target-directory']));
+    tail.some((w) => w !== null && w.startsWith('-') && isTargetDirFlag(w));
+  // Only the SEPARATED spelling has a following operand. `-tout` carries its
+  // value inside the token, and flagInfo reports its LAST letter, which for that
+  // spelling happens to be `t` -- so the credential after it was mistaken for the
+  // target directory and dropped from the sources (/code-review round 6).
+  // Only the SEPARATED spelling has a FOLLOWING operand. flagInfo reads a short
+  // bundle's LAST letter and reports no attached value, so `-tout` looked exactly
+  // like a separated `-t` and the credential after it was dropped from the sources
+  // as if it were the target directory (/code-review round 6). The first `t` is
+  // the flag; everything after it is its value.
+  const targetTakesNextWord = (w: string): boolean => {
+    if (w.startsWith('--'))
+      return !w.includes('=') && w.length >= 3 && '--target-directory'.startsWith(w);
+    const m = /^-[a-zA-Z]*?t(.*)$/.exec(w);
+    return m !== null && m[1] === '';
+  };
   const targetOperand = (a: PositionedArg) =>
-    targetDir && operandOf(a, ['t', '--target-directory']);
+    targetDir && a.afterFlag !== null && targetTakesNextWord(a.afterFlag);
   // The destination is the last NON-FLAG word; when it is dynamic (`$DEST`) it
   // is not a slot, so every slot is a source (`cp K $DEST -v` ends in a flag).
   const lastOperand = [...tail].reverse().find((w) => w === null || !w.startsWith('-'));
@@ -2814,8 +2842,20 @@ function copySourcePaths(words: (string | null)[]): string[] {
   //   jailed source, elsewhere      -> the credential is LEAVING: review
   if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand)) {
     const jailedSources = sources.filter((p) => matchSensitivePath(p));
-    const dirOf = (p: string) => p.replace(/[\\/][^\\/]*$/, '');
+    // '' for a bare name, so `mv .env .env.local` compares equal instead of
+    // comparing `.env` with `.env.local` and prompting (/code-review round 6).
+    const dirOf = (p: string) => (/[\\/]/.test(p) ? p.replace(/[\\/][^\\/]*$/, '') : '');
     if (jailedSources.length === 0) return [];
+    // ⚠️ KNOWN AND FILED, not closed here: `cp` FOLLOWS a symlink at the
+    // destination, so `ln -s /tmp/steal ~/.ssh/out` and then
+    // `cp ~/.ssh/id_rsa ~/.ssh/out` writes the key outside the jail with both
+    // paths looking in-jail (/code-review round 6, verified on a real
+    // filesystem). Restricting this exemption to `mv` -- which calls rename(2)
+    // and replaces the link instead of writing through it -- would close that
+    // path, and would also turn `cp ~/.ssh/config ~/.ssh/config.bak` into a
+    // prompt, a row stage 4 deliberately made quiet. Closing it properly needs
+    // symlink awareness, which this tier does not have and must not acquire by
+    // touching the filesystem. BUGS.md JAIL-13.
     if (jailedSources.every((p) => dirOf(p) === dirOf(lastOperand))) return [];
   }
   return sources;
@@ -3035,19 +3075,13 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
   // this it read as UNKNOWN and `grep -5 .env notes.md` kept its false positive.
   if (/^-\d+$/.test(token)) return NONE;
   if (token.startsWith('--')) {
-    if (token.includes('=')) {
-      // It carries its own value, so it consumes no following word -- but only
-      // if we RECOGNISE it. An unknown `=` flag may be anything, including a
-      // value-taking flag whose separated spelling we would have caught:
-      // `grep --config=KEY` opens the key on ugrep (/code-review round 3).
-      const eqName = token.slice(0, token.indexOf('='));
-      const recognised =
-        namesFlag(eqName, shape.takesValue, known) ||
-        namesFlag(eqName, shape.noValue, known) ||
-        namesFlag(eqName, shape.patternFlags, known) ||
-        namesFlag(eqName, shape.noPatternFlags, known);
-      return recognised ? NONE : UNKNOWN;
-    }
+    // An `=` token carries its own value, so it consumes no following word --
+    // true in getopt_long and in clap, for a recognised flag or not. Returning
+    // UNKNOWN here (round 3's first cut) bought nothing and hard-blocked
+    // `grep --group-separator=--- -A1 .env notes.md` (/code-review round 6). The
+    // VALUE is a separate question and flagOperandFiles judges it, including for
+    // an unrecognised flag: `grep --config=KEY` still blocks.
+    if (token.includes('=')) return NONE;
     const takes = namesFlag(token, shape.takesValue, known);
     const none = namesFlag(token, shape.noValue, known);
     // An abbreviation that could be either is unknown, not a coin toss.

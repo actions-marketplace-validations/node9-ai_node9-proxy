@@ -286,6 +286,44 @@ describe('stage 4 — round 3', () => {
 // the SAME directory is a rename, and a jailed source going anywhere else is the
 // credential leaving.
 // ─────────────────────────────────────────────────────────────────────────────
+describe('the target-directory flag, in every spelling', () => {
+  // /code-review round 6: flagInfo reads a short bundle's LAST letter and reports
+  // no attached value, so `-ttmp` gave letter `p` (the flag went unseen) and
+  // `-tout` gave letter `t` with no attached value (so the credential AFTER it was
+  // taken for the target directory and dropped from the sources). Both produced no
+  // finding at all while `cp -t tmp KEY` reviewed. The first `t` is the flag and
+  // everything after it is its value.
+  const K3 = '/home/u/.ssh/id_rsa';
+  const D3 = '/home/u/.ssh';
+  const verdict = (c: string) => {
+    const r = analyzeFsOperation(c);
+    return r ? r.verdict : 'null';
+  };
+
+  it.each([
+    [`cp -t tmp ${K3}`],
+    [`cp -ttmp ${K3}`],
+    [`cp -rttmp ${K3}`],
+    [`mv -tout ${K3}`],
+    [`install -tbin ${K3}`],
+    [`cp --target-directory /tmp ${K3}`],
+    [`cp --target-directory=/tmp ${K3}`],
+    [`cp --target-director=tmp ${K3}`],
+  ])('%s is a review', (c) => expect(verdict(c)).toBe('review'));
+
+  it('and the target DIRECTORY itself is not a source', () => {
+    expect(verdict(`cp -t ${D3} /tmp/ci_key`)).toBe('null');
+    expect(verdict(`cp --target-directory=${D3} /tmp/ci_key`)).toBe('null');
+  });
+
+  it('a relative rename is not a copy out', () => {
+    // dirOf('') vs dirOf('') for bare names: `mv .env .env.local` must stay quiet,
+    // as its absolute spelling already did.
+    expect(verdict(`mv .env .env.local`)).toBe('null');
+    expect(verdict(`cp .env .env.bak`)).toBe('null');
+  });
+});
+
 describe('a destination that only LOOKS jailed does not silence the review', () => {
   const K2 = '/home/u/.ssh/id_rsa';
   const D2 = '/home/u/.ssh';

@@ -542,6 +542,34 @@ describe('stage 5a — an attached operand is not a bundle of flags', () => {
   ])('%s', (c) => expect(v(c)).toBe('null'));
 });
 
+// ── 6e. /code-review round 6: the UNKNOWN abort had no row of its own. ──────
+// Mutation-proved: neutering the abort left all 1995 tests green while round 2's
+// measured ugrep bypass came back. These rows are the abort's own witness, in the
+// SEPARATED spelling, which is the one the walk decides.
+describe('stage 5a — an unknown flag before the pattern excuses nothing', () => {
+  it.each([
+    [`grep --include-from ${K} needle notes.txt`],
+    [`grep --ignore-files ${K} needle notes.txt`],
+    [`grep --from ${K} needle notes.txt`],
+    [`grep --match ${K} notes.txt`],
+    [`grep --group-separator ${K} needle`],
+    [`rg --no-such-flag ${K} needle`],
+    [`sudo grep --from ${K} needle notes.txt`],
+  ])('%s', (c) => expect(v(c)).toBe('block'));
+
+  it('and an unknown flag AFTER the pattern does not suppress it', () => {
+    // The pattern is resolved left to right, so a flag past it is irrelevant.
+    expect(v(`grep -n .env --some-unknown-flag`)).toBe('null');
+  });
+
+  it('an `=` token consumes nothing, recognised or not', () => {
+    // It cannot take the next word in getopt_long or clap, so the walk continues
+    // and the VALUE is judged separately.
+    expect(v(`grep --group-separator=--- -A1 .env notes.md`)).toBe('null');
+    expect(v(`grep --config=${K} needle`)).toBe('block');
+  });
+});
+
 // ── 7. Reached through a wrapper: the same table. ────────────────────────────
 describe('stage 5a — the wrapped read sees the same slots', () => {
   it.each([
