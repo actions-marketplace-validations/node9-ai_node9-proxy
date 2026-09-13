@@ -135,6 +135,41 @@ function parseShared(command: string): any | typeof PARSE_FAIL {
   return parsed;
 }
 
+/**
+ * mvdan-sh reports every node position as a BYTE offset into the command's UTF-8
+ * encoding. `String.prototype.slice` counts UTF-16 code units. For a pure-ASCII
+ * command the two agree, which is why this went unnoticed through four stages of
+ * jail work; with one accented character earlier in the string every later offset
+ * is too large, the rewrites below splice at the wrong place, and the detectors
+ * are handed corrupted text:
+ *
+ *   echo café && cat ~/.ssh/id_rsa   ->   "echo café&& ccat//home/u/.ssh/id_rsa"
+ *
+ * Nothing matches that, so the credential read was ALLOW -- and not only for the
+ * jail: the rm and chmod detectors read the same normalized string. BUGS.md
+ * JAIL-12, found by /code-review round 4.
+ *
+ * Returns null for a pure-ASCII command, which is the hot path and needs no map
+ * at all. Otherwise returns a lookup that yields the UTF-16 index for a byte
+ * offset, or -1 when the offset does not land on a character boundary (a case
+ * that should not arise for token boundaries; the caller then skips that edit
+ * rather than splicing at a guess).
+ */
+function byteOffsetToCharIndex(command: string): ((byteOffset: number) => number) | null {
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\u0000-\u007F]/.test(command)) return null;
+  const map = new Map<number, number>();
+  let byte = 0;
+  for (let i = 0; i < command.length;) {
+    map.set(byte, i);
+    const cp = command.codePointAt(i) as number;
+    byte += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    i += cp > 0xffff ? 2 : 1;
+  }
+  map.set(byte, command.length);
+  return (b: number) => map.get(b) ?? -1;
+}
+
 function cachedNormalize(command: string, compute: () => CommandReadings): CommandReadings {
   const hit = normalizeCache.get(command);
   if (hit !== undefined) {
@@ -198,6 +233,12 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     // Two kinds of in-place edits, applied together right-to-left so offsets
     // stay valid: (1) message-flag value strips (-m "msg" → -m ""), and
     // (2) intra-word de-obfuscation rewrites (r''m → rm).
+    // Byte offsets from mvdan-sh are converted to UTF-16 indices before any
+    // slicing (JAIL-12). `null` means the command is pure ASCII and the two are
+    // the same, which is the common case and costs nothing.
+    const toCharIndex = byteOffsetToCharIndex(command);
+    const at = (byteOffset: number): number =>
+      toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
     const strips: Array<[number, number]> = [];
     const rewrites: Array<[number, number, string]> = [];
     // The SEPARATOR reading's rewrites: quote-obfuscation removed, but every
@@ -235,8 +276,9 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         const quotedNode = nextParts[0] as any;
         const nt: string = syntax.NodeType(quotedNode);
         const markStrip = (): void => {
-          const s = next.Pos().Offset();
-          const e = next.End().Offset();
+          const s = at(next.Pos().Offset());
+          const e = at(next.End().Offset());
+          if (s < 0 || e < 0) return; // not a character boundary: leave it alone
           strips.push([s, e]);
           msgSpans.add(`${s}:${e}`); // exclude from de-obfuscation below
         };
@@ -269,8 +311,9 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
       // message-flag values stripped above. Operators/positions are preserved,
       // so the rules' command-boundary anchoring still holds.
       for (const arg of args) {
-        const s = arg.Pos().Offset();
-        const e = arg.End().Offset();
+        const s = at(arg.Pos().Offset());
+        const e = at(arg.End().Offset());
+        if (s < 0 || e < 0) continue; // not a character boundary: leave it alone
         if (msgSpans.has(`${s}:${e}`)) continue; // already a stripped message value
         const resolved = resolveWordLiteral(arg);
         if (resolved === null) continue; // dynamic ($VAR / $(...)) — leave as-is

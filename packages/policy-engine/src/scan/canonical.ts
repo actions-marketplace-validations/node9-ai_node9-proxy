@@ -380,6 +380,28 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Verdict snapshot over 390 corpus commands: 0 moved -- no corpus row used an
 // `=` spelling, which is exactly why the bypass survived four stages.
 //
+// Half three, JAIL-12, found by /code-review round 4 while reviewing the above
+// and severe enough that it outranks both: mvdan-sh reports positions as BYTE
+// offsets into UTF-8 and this file's normalizer sliced the JS string with them as
+// UTF-16 indices. One accented character anywhere in a command misaligned every
+// later offset, the de-obfuscation rewrites spliced at the wrong place, and every
+// detector that reads the normalized string -- the jail, rm, chmod -- was handed
+// corrupted text:
+//
+//   echo café && cat ~/.ssh/id_rsa   ->   "echo café&& ccat//home/u/.ssh/id_rsa"
+//
+//   command                                v14                 v15
+//   echo café && cat KEY                 (none)  ->  ast-fs-op block/critical
+//   echo 日本語 && cat KEY                 (none)  ->  ast-fs-op block/critical
+//   echo 🔑 && cat ~/p/.env              (none)  ->  ast-fs-op block/high
+//   grep é KEY                           (none)  ->  ast-fs-op block/critical
+//   echo café && rm -rf ~                (none)  ->  block-rm-rf-home
+//   echo café && r''m -rf /tmp/x         normalizes to `rm` either way (control)
+//
+// Pure-ASCII commands take a fast path and are bit-identical, which is why the
+// 390-row corpus does not move: it contains no non-ASCII row. That is also why
+// this survived four stages of jail work.
+//
 // Half two, stage 5a: the search-PATTERN slot. `grep -n '.env' .gitignore` was a
 // hard block, and so were `rg "\.env\.local"` and `grep -rn ".ssh/config"
 // docs/`. None reads a credential: each hands the jail name to a reader as its
@@ -496,7 +518,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '3aa89e1f63cb76ed';
+export const CANONICAL_EXTRACTOR_HASH = '4fb92728ce75bf3c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
