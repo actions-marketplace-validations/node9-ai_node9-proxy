@@ -117,7 +117,7 @@ export {
 // a network-safe summary the proxy pushes to the SaaS on every policy-sync
 // tick. Pure: host code does the I/O, engine sanitises + sorts.
 export type { BlastFinding, BlastEnvFinding, BlastResult, BlastSummary } from './blast';
-export { summarizeBlast, truncateBlastPath } from './blast';
+export { summarizeBlast, truncateBlastPath, MAX_BLAST_PATH } from './blast';
 
 // Scan summarization — forward-only watermark scanner output, reduced to
 // counts-only summary the proxy pushes to the SaaS on every policy-sync
