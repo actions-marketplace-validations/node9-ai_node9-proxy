@@ -228,7 +228,13 @@ const SECRET_KEY_RE = /password|secret|token|key|apikey|credential|auth/i;
 export function redactArgs(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(redactArgs);
-  const result: Record<string, unknown> = {};
+  // Null-prototype target: on a plain `{}`, assigning the key `__proto__` hits
+  // the inherited setter instead of creating an own property, so an argument by
+  // that name never reaches JSON.stringify and vanishes from the audit entry.
+  // Losing an audited field is the real risk here, not pollution — the value is
+  // per-object and stringify ignores the prototype. Args arrive via JSON.parse,
+  // which does give `__proto__` as an own key.
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     result[k] = SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactArgs(v);
   }

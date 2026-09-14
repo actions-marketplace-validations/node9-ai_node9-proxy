@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { summarizeBlast, truncateBlastPath, type BlastResult } from './index';
+import { summarizeBlast, truncateBlastPath, MAX_BLAST_PATH, type BlastResult } from './index';
 
 describe('truncateBlastPath', () => {
   it('keeps already-short paths unchanged (≤2 segments)', () => {
@@ -27,6 +27,28 @@ describe('truncateBlastPath', () => {
 
   it('strips trailing separators before counting segments', () => {
     expect(truncateBlastPath('/foo/bar/')).toBe('foo/bar');
+  });
+
+  // The path reaching here comes from a tool call, so its length and shape are
+  // agent-controlled. The old trailing-separator strip used /[/\\]+$/, which
+  // backtracks quadratically when a run of separators is followed by anything
+  // else: the engine retries the match from every index and fails at each.
+  // Measured on the pre-fix code: 20k separators 111ms, 40k 439ms, 80k 1759ms.
+  it('truncates a separator flood in linear time (CodeQL js/polynomial-redos)', () => {
+    const flood = '/'.repeat(200_000) + 'a';
+    const started = Date.now();
+    expect(truncateBlastPath(flood)).toBe('a');
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it('caps an absurdly long path instead of walking all of it', () => {
+    const long = '/' + 'x'.repeat(MAX_BLAST_PATH * 2) + '/tail';
+    expect(truncateBlastPath(long).length).toBeLessThanOrEqual(MAX_BLAST_PATH);
+  });
+
+  it('still keeps the last 2 segments when separators trail a real path', () => {
+    expect(truncateBlastPath('/Users/alice/app/.env///')).toBe('app/.env');
+    expect(truncateBlastPath('C:\\Users\\alice\\app\\.env\\\\')).toBe('app/.env');
   });
 });
 
