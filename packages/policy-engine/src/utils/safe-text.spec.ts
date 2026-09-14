@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripTerminalEscapes, stripAnsiSequences, stripControlChars } from './safe-text';
+import { stripTerminalEscapes, stripControlChars, safeMessage } from './safe-text';
 
 // A forged "success" line: CR to return to column 0, SGR green, fake text.
 const FORGED_LINE = '\x1b[32m OK Cloud: connected and governed\x1b[0m';
@@ -31,18 +31,6 @@ describe('stripTerminalEscapes', () => {
   });
 });
 
-describe('stripAnsiSequences', () => {
-  it('removes escape sequences', () => {
-    expect(stripAnsiSequences('\x1b[31mred\x1b[0m')).toBe('red');
-    expect(stripAnsiSequences('\x1b]0;title\x07rest')).toBe('rest');
-  });
-
-  it('leaves every other character alone, including C0 and whitespace', () => {
-    expect(stripAnsiSequences('a\tb\nc\rd')).toBe('a\tb\nc\rd');
-    expect(stripAnsiSequences('a\x00b\x07c')).toBe('a\x00b\x07c');
-  });
-});
-
 describe('stripControlChars', () => {
   it('removes every C0 control and DEL, whitespace included', () => {
     expect(stripControlChars('a\tb\nc\rd')).toBe('abcd');
@@ -62,13 +50,53 @@ describe('the three are deliberately different', () => {
     expect(stripTerminalEscapes(input)).toBe('alpha\nbeta\ttail');
     expect(stripTerminalEscapes(input).replace(/\s+/g, ' ')).toBe('alpha beta tail');
     expect(stripControlChars(input)).toBe('alphabetatail');
-    expect(stripAnsiSequences(input)).toBe('alpha\nbeta\ttail');
   });
 
   it('differs on non-whitespace C0 controls', () => {
     const input = 'a\x07b';
     expect(stripTerminalEscapes(input)).toBe('ab');
     expect(stripControlChars(input)).toBe('ab');
-    expect(stripAnsiSequences(input)).toBe('a\x07b');
+  });
+});
+
+describe('safeMessage', () => {
+  it('cannot forge a second terminal line', () => {
+    // The attack: CR returns the cursor to column 0, then green SGR paints a
+    // line that looks like one of ours.
+    const hostile = 'timeout\r\x1b[32m OK Cloud: connected and governed\x1b[0m';
+    const out = safeMessage(hostile);
+    expect(out).toBe('timeout OK Cloud: connected and governed');
+    expect(out).not.toContain('\r');
+    expect(out).not.toContain('\x1b');
+  });
+
+  it('cannot forge a second log entry', () => {
+    const hostile = 'boom\n[2026-09-14T00:00:00.000Z] ALLOW everything';
+    expect(safeMessage(hostile)).not.toContain('\n');
+  });
+
+  it('collapses every run of whitespace to one space', () => {
+    expect(safeMessage('a \t\n\r  b')).toBe('a b');
+  });
+
+  it('caps length so a peer cannot flood the log', () => {
+    const out = safeMessage('x'.repeat(5000));
+    expect(out.length).toBe(300);
+    expect(out.endsWith('\u2026')).toBe(true);
+  });
+
+  it('honours a custom cap', () => {
+    expect(safeMessage('x'.repeat(100), 10).length).toBe(10);
+  });
+
+  it('accepts an Error, a non-string, null and undefined', () => {
+    expect(safeMessage(new Error('bad\nthing'))).toBe('bad thing');
+    expect(safeMessage(42)).toBe('42');
+    expect(safeMessage(null)).toBe('');
+    expect(safeMessage(undefined)).toBe('');
+  });
+
+  it('leaves an ordinary message untouched', () => {
+    expect(safeMessage('Server returned HTTP 503.')).toBe('Server returned HTTP 503.');
   });
 });

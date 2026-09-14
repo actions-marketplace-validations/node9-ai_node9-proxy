@@ -7,7 +7,7 @@
 // kept in step only by comments. They are collected here so a fix reaches
 // every caller at once.
 //
-// There are three functions rather than one because the three jobs genuinely
+// There are separate functions rather than one because the jobs genuinely
 // differ, and flattening them corrupts output:
 //
 //   stripTerminalEscapes('alpha\nbeta\ttail') -> 'alpha\nbeta\ttail'
@@ -35,15 +35,6 @@ const TERMINAL_ESCAPE_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
 /**
- * Escape sequences only (CSI, OSC, Fe). Leaves every other character alone,
- * including all whitespace and other C0 controls.
- *
- * For short display strings that are shown verbatim and must not be able to
- * repaint the terminal: agent names, MCP server names, DLP samples.
- */
-const ANSI_SEQUENCE_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g;
-
-/**
  * Every C0 control and DEL, whitespace included.
  *
  * For values that must be a single opaque token: tool names on their way into
@@ -60,12 +51,33 @@ export function stripTerminalEscapes(s: string): string {
   return s.replace(TERMINAL_ESCAPE_RE, '');
 }
 
-/** See ANSI_SEQUENCE_RE. Removes escape sequences and nothing else. */
-export function stripAnsiSequences(s: string): string {
-  return s.replace(ANSI_SEQUENCE_RE, '');
-}
-
 /** See CONTROL_CHAR_RE. Removes every C0 control and DEL, whitespace included. */
 export function stripControlChars(s: string): string {
   return s.replace(CONTROL_CHAR_RE, '');
+}
+
+/**
+ * One safe line, for any string that came from outside this process before it
+ * reaches a terminal or a log file.
+ *
+ * node9's terminal output IS the user's trust signal: a "connected and
+ * governed" line is what tells someone the machine is protected. A response
+ * field carrying CR plus SGR codes can paint a line that looks exactly like
+ * one of ours, and a newline in a value written to hook-debug.log forges a
+ * second journal entry. So: escape sequences removed, all whitespace collapsed
+ * to single spaces (one value can never become two lines), and a length cap so
+ * a hostile or broken peer cannot flood the log.
+ *
+ * Accepts unknown because most call sites hold a caught `error` or an optional
+ * response field.
+ */
+export function safeMessage(value: unknown, max = 300): string {
+  const raw =
+    typeof value === 'string'
+      ? value
+      : value instanceof Error
+        ? value.message
+        : String(value ?? '');
+  const s = stripTerminalEscapes(raw).replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
 }
