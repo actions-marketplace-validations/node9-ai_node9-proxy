@@ -99,7 +99,7 @@ describe('openBrowser on Windows', () => {
 
   afterEach(() => setPlatform(realPlatform));
 
-  it('invokes cmd.exe with the URL in its own argument slot, no shell', async () => {
+  it('uses explorer.exe, never a command interpreter', async () => {
     setPlatform('win32');
     vi.resetModules();
     spawnMock.mockClear();
@@ -108,11 +108,35 @@ describe('openBrowser on Windows', () => {
 
     expect(mod.openBrowser(url)).toBe(true);
     const [cmd, args, opts] = spawnMock.mock.calls[0];
-    expect(cmd).toBe('cmd.exe');
-    // `start` needs a window-title placeholder before its target, otherwise it
-    // treats a quoted URL as the title and opens nothing.
-    expect(args).toEqual(['/c', 'start', '', url]);
+    expect(cmd).toBe('explorer.exe');
+    expect(args).toEqual([url]);
     expect(opts?.shell).toBeUndefined();
+  });
+
+  it('never spawns cmd.exe, which re-parses & even with shell off', async () => {
+    // Proven on Windows 10.0.26200: spawn('cmd.exe', ['/c','echo', url]) with
+    // shell:false still split at `&`, because Node leaves a space-free
+    // argument unquoted and cmd.exe parses what it is handed.
+    setPlatform('win32');
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+
+    mod.openBrowser('https://app.node9.ai/device?a=1&b=2');
+    const spawned = spawnMock.mock.calls.map((c) => c[0]);
+    expect(spawned).not.toContain('cmd.exe');
+    expect(spawned).not.toContain('powershell.exe');
+  });
+
+  it('passes an ampersand URL through as a single argument', async () => {
+    setPlatform('win32');
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+    const url = 'https://app.node9.ai/device?a=1&b=2';
+
+    expect(mod.openBrowser(url)).toBe(true);
+    expect(spawnMock.mock.calls[0][1]).toEqual([url]);
   });
 
   it('still refuses a metacharacter URL on Windows', async () => {

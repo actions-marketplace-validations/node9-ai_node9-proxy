@@ -34,17 +34,29 @@ export function openBrowser(url: string): boolean {
   if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     return false;
   }
-  // No `shell: true`. Node concatenates args into one shell string when the
-  // shell option is set and does NOT escape them (Node's own DEP0190), so a
-  // URL containing `&` used to run whatever followed it under cmd.exe. Windows
-  // still needs a shell for `start` because it is a cmd builtin, so invoke
-  // cmd.exe directly with the URL in its own argument slot; the `''` is the
-  // window-title placeholder `start` expects before its target.
+  // Never route the URL through a command interpreter.
+  //
+  // The original code used spawn('start', [url], { shell: true }), where Node
+  // concatenates args into one shell string without escaping them (Node's own
+  // DEP0190), so `&` in a URL ran whatever followed. Dropping `shell: true`
+  // and calling cmd.exe directly is NOT enough, which a real Windows box
+  // settled: Node only quotes an argument that contains a space, tab or quote,
+  // a URL has none, so cmd.exe still re-parsed the unquoted `&`.
+  //
+  //   node -e "spawn('cmd.exe',['/c','echo','https://x.test/?a=1&ver'])"
+  //   -> https://x.test/?a=1
+  //      Microsoft Windows [Version 10.0.26200.9445]
+  //
+  // `start` is a cmd builtin, so using it means using cmd. explorer.exe is a
+  // real executable that hands the URL to the default handler, so there is no
+  // interpreter in the path and `&` is just a character. Escaping for cmd was
+  // the alternative and it is the kind of thing that is wrong until proven
+  // otherwise; this removes the class instead.
   const [cmd, args] =
     process.platform === 'darwin'
       ? ['open', [url]]
       : process.platform === 'win32'
-        ? ['cmd.exe', ['/c', 'start', '', url]]
+        ? ['explorer.exe', [url]]
         : ['xdg-open', [url]];
   try {
     const child = spawn(cmd, args as string[], {
