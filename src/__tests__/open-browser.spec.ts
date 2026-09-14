@@ -99,7 +99,7 @@ describe('openBrowser on Windows', () => {
 
   afterEach(() => setPlatform(realPlatform));
 
-  it('uses explorer.exe, never a command interpreter', async () => {
+  it('uses rundll32 with the URL in its own argument, no interpreter', async () => {
     setPlatform('win32');
     vi.resetModules();
     spawnMock.mockClear();
@@ -108,12 +108,26 @@ describe('openBrowser on Windows', () => {
 
     expect(mod.openBrowser(url)).toBe(true);
     const [cmd, args, opts] = spawnMock.mock.calls[0];
-    expect(cmd).toBe('explorer.exe');
-    expect(args).toEqual([url]);
+    expect(cmd).toBe('rundll32.exe');
+    // The handler and its entry point are one argument, comma-separated and
+    // with no space; rundll32 does not parse them otherwise.
+    expect(args).toEqual(['url.dll,FileProtocolHandler', url]);
     expect(opts?.shell).toBeUndefined();
   });
 
-  it('never spawns cmd.exe, which re-parses & even with shell off', async () => {
+  it('does not use explorer.exe, which opened a folder instead of a browser', async () => {
+    // Measured on Windows 10.0.26200: spawn('explorer.exe', [url]) opened an
+    // Explorer window, not the default browser.
+    setPlatform('win32');
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+
+    mod.openBrowser('https://app.node9.ai/device');
+    expect(spawnMock.mock.calls.map((c) => c[0])).not.toContain('explorer.exe');
+  });
+
+  it('never spawns an interpreter: cmd re-parses & even with shell off', async () => {
     // Proven on Windows 10.0.26200: spawn('cmd.exe', ['/c','echo', url]) with
     // shell:false still split at `&`, because Node leaves a space-free
     // argument unquoted and cmd.exe parses what it is handed.
@@ -136,7 +150,11 @@ describe('openBrowser on Windows', () => {
     const url = 'https://app.node9.ai/device?a=1&b=2';
 
     expect(mod.openBrowser(url)).toBe(true);
-    expect(spawnMock.mock.calls[0][1]).toEqual([url]);
+    // The URL must arrive whole in one argument slot. Splitting it at the `&`
+    // was the original vulnerability, and a truncated URL is the symptom.
+    const args = spawnMock.mock.calls[0][1];
+    expect(args[args.length - 1]).toBe(url);
+    expect(args.join(' ')).toContain('&b=2');
   });
 
   it('still refuses a metacharacter URL on Windows', async () => {

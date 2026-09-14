@@ -36,27 +36,29 @@ export function openBrowser(url: string): boolean {
   }
   // Never route the URL through a command interpreter.
   //
-  // The original code used spawn('start', [url], { shell: true }), where Node
-  // concatenates args into one shell string without escaping them (Node's own
-  // DEP0190), so `&` in a URL ran whatever followed. Dropping `shell: true`
-  // and calling cmd.exe directly is NOT enough, which a real Windows box
-  // settled: Node only quotes an argument that contains a space, tab or quote,
-  // a URL has none, so cmd.exe still re-parsed the unquoted `&`.
+  // Measured on Windows 10.0.26200, three candidates, one run:
+  //   rundll32.exe url.dll,FileProtocolHandler <url>   opened the browser, &b=2 intact
+  //   cmd.exe /c start "" "<url>"  (quoted)            opened the browser, &b=2 intact
+  //   powershell.exe -Command Start-Process '<url>'    opened nothing
   //
-  //   node -e "spawn('cmd.exe',['/c','echo','https://x.test/?a=1&ver'])"
-  //   -> https://x.test/?a=1
-  //      Microsoft Windows [Version 10.0.26200.9445]
+  // Two worked; this takes rundll32 because it is the only one with no command
+  // interpreter in the path. The cmd form is safe only while its quoting stays
+  // exactly right, and that is precisely what went wrong twice already:
+  // spawn('start', [url], { shell: true }) concatenated unescaped (Node's own
+  // DEP0190), and dropping the shell option did not help either, because Node
+  // leaves a space-free argument unquoted and cmd.exe parsed the `&` it was
+  // handed. With rundll32 there is nothing to quote and nothing to get wrong.
   //
-  // `start` is a cmd builtin, so using it means using cmd. explorer.exe is a
-  // real executable that hands the URL to the default handler, so there is no
-  // interpreter in the path and `&` is just a character. Escaping for cmd was
-  // the alternative and it is the kind of thing that is wrong until proven
-  // otherwise; this removes the class instead.
+  // explorer.exe was tried and rejected: its argument parsing is quirky enough
+  // that it opened a folder window instead of the browser.
+  //
+  // The isOpenableUrl scheme check above is load-bearing here, not decoration:
+  // FileProtocolHandler will happily open file:// too.
   const [cmd, args] =
     process.platform === 'darwin'
       ? ['open', [url]]
       : process.platform === 'win32'
-        ? ['explorer.exe', [url]]
+        ? ['rundll32.exe', ['url.dll,FileProtocolHandler', url]]
         : ['xdg-open', [url]];
   try {
     const child = spawn(cmd, args as string[], {
