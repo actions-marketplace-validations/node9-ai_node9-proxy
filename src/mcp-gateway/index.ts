@@ -35,15 +35,11 @@ import {
   getInternalToken,
   notifyActivitySocket,
 } from '../auth/daemon';
+import { stripControlChars } from '../utils/safe-text';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
 // human-in-the-loop approval) was retired in the v3 sprint.
-
-function sanitize(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1F\x7F]/g, '');
-}
 
 /**
  * JSON-RPC error codes used by the gateway.
@@ -108,7 +104,7 @@ export function normalizeClientName(name: unknown): string | undefined {
   if (lower.includes('gemini')) return 'Gemini';
   if (lower.includes('cline')) return 'Cline';
   if (lower.includes('continue')) return 'Continue';
-  const sanitized = sanitize(name).slice(0, 40);
+  const sanitized = stripControlChars(name).slice(0, 40);
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
@@ -458,7 +454,7 @@ export async function runMcpGateway(
       authPending = true;
 
       try {
-        const toolName = sanitize(
+        const toolName = stripControlChars(
           String(message.params?.name ?? message.params?.tool_name ?? 'unknown')
         );
         const toolArgs = (message.params?.arguments ?? message.params?.tool_input ?? {}) as unknown;

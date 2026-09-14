@@ -34,6 +34,7 @@ import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
+import { stripAnsiSequences } from '../utils/safe-text';
 
 export interface AuthResult {
   approved: boolean;
@@ -227,10 +228,10 @@ export async function authorizeHeadless(
     // Strip ANSI escape sequences — agent / mcpServer come from caller-supplied
     // metadata and may be displayed in a terminal (node9 tail/watch), enabling
     // injection. Same regex as agent below; mcpServer is shorter (40 chars max).
-    const stripAnsi = (s: string): string =>
-      s.replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '');
-    const sanitizedAgent = meta?.agent ? stripAnsi(meta.agent).slice(0, 80) : undefined;
-    const sanitizedMcpServer = meta?.mcpServer ? stripAnsi(meta.mcpServer).slice(0, 40) : undefined;
+    const sanitizedAgent = meta?.agent ? stripAnsiSequences(meta.agent).slice(0, 80) : undefined;
+    const sanitizedMcpServer = meta?.mcpServer
+      ? stripAnsiSequences(meta.mcpServer).slice(0, 40)
+      : undefined;
 
     const socketOk = await notifyActivity({
       id: actId,

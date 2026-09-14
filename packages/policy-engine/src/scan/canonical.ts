@@ -44,6 +44,7 @@ import { detectPii } from './pii';
 import { evaluateLoopWindow, type ToolCallRecord } from '../loop';
 import type { SmartRule } from '../types';
 import type { ScanFinding } from './index';
+import { stripTerminalEscapes } from '../utils/safe-text';
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -588,7 +589,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '5dad4c8f07121f6c';
+export const CANONICAL_EXTRACTOR_HASH = '6089ab2c47d5e150';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -1049,13 +1050,10 @@ export function toScanFinding(c: CanonicalFinding): ScanFinding | null {
 // Match scan.ts:331's preview helper so dedupe keys stay consistent across
 // CLI and engine consumers. Pulls a representative string out of the args
 // (command / query / file_path / JSON), trims whitespace, caps length.
-const TERMINAL_ESCAPE_RE =
-  // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
 export function previewArgs(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
-  const s = String(cmd).replace(TERMINAL_ESCAPE_RE, '').replace(/\s+/g, ' ').trim();
+  const s = stripTerminalEscapes(String(cmd)).replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 

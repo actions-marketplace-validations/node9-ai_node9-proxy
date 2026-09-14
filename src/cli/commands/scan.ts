@@ -368,13 +368,12 @@ function fmtTs(ts: string): string {
 //   - C0 control characters except whitespace (TAB, LF, CR are kept; the
 //     subsequent whitespace collapse normalizes them)
 //   - DEL (0x7f)
-// eslint-disable-next-line no-control-regex
-const TERMINAL_ESCAPE_RE =
-  /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
-
-export function stripTerminalEscapes(s: string): string {
-  return s.replace(TERMINAL_ESCAPE_RE, '');
-}
+// Re-exported so existing importers of this module keep working. The
+// implementation lives in the engine because previewArgs there must use the
+// identical one: the preview feeds dedupe keys, and a drift would hash the
+// same finding two ways.
+import { stripTerminalEscapes } from '../../utils/safe-text';
+export { stripTerminalEscapes };
 
 function preview(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
