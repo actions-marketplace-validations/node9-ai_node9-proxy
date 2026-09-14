@@ -589,7 +589,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '6089ab2c47d5e150';
+export const CANONICAL_EXTRACTOR_HASH = '2823cd6a54a1fca7';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -1047,9 +1047,10 @@ export function toScanFinding(c: CanonicalFinding): ScanFinding | null {
 
 // ── Internals ─────────────────────────────────────────────────────────────
 
-// Match scan.ts:331's preview helper so dedupe keys stay consistent across
-// CLI and engine consumers. Pulls a representative string out of the args
-// (command / query / file_path / JSON), trims whitespace, caps length.
+// Pulls a representative string out of the args (command / query / file_path /
+// JSON), trims whitespace, caps length. The CLI's scan preview re-exports the
+// same stripTerminalEscapes rather than restating it, so the dedupe keys the
+// two produce cannot drift apart.
 
 export function previewArgs(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);

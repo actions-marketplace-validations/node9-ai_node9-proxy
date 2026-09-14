@@ -227,7 +227,7 @@ export async function authorizeHeadless(
     // clock starts before any I/O side effects, and fake timers become usable.
     // Strip ANSI escape sequences — agent / mcpServer come from caller-supplied
     // metadata and may be displayed in a terminal (node9 tail/watch), enabling
-    // injection. Same regex as agent below; mcpServer is shorter (40 chars max).
+    // injection. mcpServer is capped shorter (40 chars) than agent (80).
     const sanitizedAgent = meta?.agent ? stripAnsiSequences(meta.agent).slice(0, 80) : undefined;
     const sanitizedMcpServer = meta?.mcpServer
       ? stripAnsiSequences(meta.mcpServer).slice(0, 40)

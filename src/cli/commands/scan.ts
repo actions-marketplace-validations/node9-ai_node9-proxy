@@ -362,16 +362,10 @@ function fmtTs(ts: string): string {
 // for our display, so unconditional removal is safe and avoids the class
 // entirely.
 //
-// Pattern matches:
-//   - ESC ([\x1b]) followed by typical CSI/OSC/SS3 control sequence terminators
-//   - Lone ESC bytes (defence)
-//   - C0 control characters except whitespace (TAB, LF, CR are kept; the
-//     subsequent whitespace collapse normalizes them)
-//   - DEL (0x7f)
-// Re-exported so existing importers of this module keep working. The
-// implementation lives in the engine because previewArgs there must use the
-// identical one: the preview feeds dedupe keys, and a drift would hash the
-// same finding two ways.
+// The pattern itself now lives in the engine, in utils/safe-text, because
+// previewArgs there must use the identical one: the preview feeds dedupe keys,
+// so a drift would hash the same finding two ways. Re-exported here so
+// existing importers of this module keep working.
 import { stripTerminalEscapes } from '../../utils/safe-text';
 export { stripTerminalEscapes };
 
