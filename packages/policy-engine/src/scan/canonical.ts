@@ -344,7 +344,231 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // and a path separator: a redirect read under a copy head (`gzip < KEY`) and an
 // absolute reader path (`/bin/cat KEY`) now reach the read rule and BLOCK.
 // Verdict snapshot over 390 corpus commands: 41 moved, all to review, 0 loosened.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v14';
+// v15 (2026-09-13): stage 5 of the credential jail. TWO halves, one version,
+// because one version bump means one fleet re-scan and two would mean two.
+//
+// Half one, JAIL-10: a jailed path inside a `--flag=value` token was never
+// judged. `positionedArgs` calls any word starting with `-` a flag, so the value
+// half never reached matchSensitivePath and the same read blocked or passed on
+// spelling alone. Only flags whose operand is a FILE THE VERB OPENS are judged,
+// each entry earned under `strace -e openat` against a decoy file. Measured
+// through extractCanonicalFindings before bumping:
+//
+//   command                                v14                 v15
+//   grep --file=KEY f.txt                (none)  ->  ast-fs-op block/critical
+//   grep --exclude-from=KEY -r x .       (none)  ->  ast-fs-op block/critical
+//   grep --include=KEY -r x ~            (none)  ->  ast-fs-op block/critical
+//   sed --file=KEY f.txt                 (none)  ->  ast-fs-op block/critical
+//   sort --files0-from=KEY               (none)  ->  ast-fs-op block/critical
+//   rg --file=KEY src/                   (none)  ->  ast-fs-op block/critical
+//   awk --file=KEY f.txt                 (none)  ->  ast-fs-op block/critical
+//   sudo grep --file=KEY f.txt           (none)  ->  ast-fs-op block/critical
+//   grep --file=~/p/.env f.txt           (none)  ->  ast-fs-op block/high
+//   grep --exclude=.env -r x .           (none)  ->  (none)   EXCLUDING reads nothing
+//   grep --regexp=.env f.txt             (none)  ->  (none)   a pattern, not a path
+//   sed --expression=s/.aws/x/ f.txt     (none)  ->  (none)   a script, not a path
+//   cut --output-delimiter=.env f.txt    (none)  ->  (none)   a string, not a path
+//   sort --output=KEY /tmp/newkey        (none)  ->  (none)   a WRITE: CI key install
+//   tail --follow=KEY                    (none)  ->  (none)   opens nothing (measured)
+//   grep --color=always foo f.txt        (none)  ->  (none)   ordinary flag value
+//   cat KEY                              block   ->  block    (control, unmoved)
+//   grep -f KEY f.txt                    block   ->  block    (control, unmoved)
+//
+// The five quiet `=` rows are the reason this is a per-flag table and not
+// "judge every `=` value": that reading would have invented four false
+// positives, one of them the CI key-install case the corpus protects.
+// Verdict snapshot over 390 corpus commands: 0 moved -- no corpus row used an
+// `=` spelling, which is exactly why the bypass survived four stages.
+//
+// Half three, JAIL-12, found by /code-review round 4 while reviewing the above
+// and severe enough that it outranks both: mvdan-sh reports positions as BYTE
+// offsets into UTF-8 and this file's normalizer sliced the JS string with them as
+// UTF-16 indices. One accented character anywhere in a command misaligned every
+// later offset, the de-obfuscation rewrites spliced at the wrong place, and every
+// detector that reads the normalized string -- the jail, rm, chmod -- was handed
+// corrupted text:
+//
+//   echo café && cat ~/.ssh/id_rsa   ->   "echo café&& ccat//home/u/.ssh/id_rsa"
+//
+//   command                                v14                 v15
+//   echo café && cat KEY                 (none)  ->  ast-fs-op block/critical
+//   echo 日本語 && cat KEY                 (none)  ->  ast-fs-op block/critical
+//   echo 🔑 && cat ~/p/.env              (none)  ->  ast-fs-op block/high
+//   grep é KEY                           (none)  ->  ast-fs-op block/critical
+//   echo café && rm -rf ~                (none)  ->  block-rm-rf-home
+//   echo café && r''m -rf /tmp/x         normalizes to `rm` either way (control)
+//
+// Pure-ASCII commands take a fast path and are bit-identical, which is why the
+// 390-row corpus does not move: it contains no non-ASCII row. That is also why
+// this survived four stages of jail work.
+//
+// Half two, stage 5a: the search-PATTERN slot. `grep -n '.env' .gitignore` was a
+// hard block, and so were `rg "\.env\.local"` and `grep -rn ".ssh/config"
+// docs/`. None reads a credential: each hands the jail name to a reader as its
+// search pattern, and the read tier judged every positional word of a reader as
+// a path. Stage 3 kept the slot for exactly this. FOUR verbs (grep, egrep,
+// fgrep, rg), each flag verified on a real binary; sed and awk are excluded
+// because their program slot can read a file from inside itself. Measured
+// through extractCanonicalFindings:
+//
+//   command                                v14                 v15
+//   grep -n '.env' .gitignore            block/critical  ->  (none)
+//   rg "\.env\.local"                    block/critical  ->  (none)
+//   rg .env src/                         block/critical  ->  (none)
+//   grep -e .env f.txt                   block/critical  ->  (none)
+//   grep -A 3 .env f.txt                 block/critical  ->  (none)
+//   grep -rn "~/.ssh" docs/              block/critical  ->  (none)
+//   grep -rn ".ssh/config" docs/         block/critical  ->  (none)
+//   rg --files-with-matches ".env" .     block/critical  ->  (none)
+//   grep -rn "credentials.json" src/     review/critical ->  (none)
+//   grep ~/.ssh/id_rsa                   block/critical  ->  (none)  stdin search
+//   grep -n foo KEY                      block   ->  block   the FILE slot
+//   grep -r TODO ~/.ssh                  block   ->  block
+//   grep -f KEY f.txt                    block   ->  block   patterns FROM the key
+//   grep -rnf KEY f.txt                  block   ->  block   the same, bundled
+//   grep -en KEY                         block   ->  block   -e not last: KEY is a FILE
+//   rg --files ~/.ssh                    block   ->  block   founder decision
+//   grep --color never foo KEY           block   ->  block   --color consumes NOTHING
+//   cat KEY                              block   ->  block   (control)
+//   sed -i s/.aws/x/ f.txt               block   ->  block   stage 5b, still an FP
+//
+// /code-review round 1 (2026-09-13) found six issues in the two halves above,
+// three of them BLOCK -> ALLOW regressions this stage introduced, all fixed with
+// a red row each and none of them moving the corpus:
+//   - getopt_long takes any unambiguous PREFIX, so `grep --regex=foo KEY` and
+//     `grep --inc=KEY` resolved to --regexp/--include in the real tool while
+//     exact-name matching here excused the key. namesFlag now resolves prefixes,
+//     with getopt's own exact-wins rule (without it, `--exclude` read as
+//     `--exclude-from` and invented a false positive).
+//   - `--group-separator` takes an OPTIONAL argument in ugrep 7.8.4, so it eats
+//     nothing and `grep -H --group-separator SECRET KEY` read the key. Removed
+//     from the value set: the engine cannot know which grep is installed.
+//   - an ATTACHED short operand (`grep -fKEY`, `sed -fKEY`) is the third
+//     spelling of one read and was never covered.
+// /code-review round 2 found six more, three of them bypasses introduced by the
+// round-1 fix, and one of them refuted a premise rather than a line of code:
+//   - an UNLISTED value-taking flag handed its own operand to the excused
+//     pattern slot, so `grep --include-from KEY needle notes.txt` opened KEY
+//     under ugrep. "A flag missing from the table only leaves a false positive"
+//     was therefore FALSE. The flag before a candidate word now has THREE
+//     states -- consumes nothing, consumes a word, UNKNOWN -- and unknown
+//     excuses nothing at all. That is what makes the table's incompleteness safe.
+//   - `--binary` is an exact GNU option and was prefix-resolving to
+//     `--binary-files`; `rg --pcre2` to `--pcre2-version`. Both are now listed.
+//   - the attached-operand scan found the `f` inside `-e'config/.env'`; it now
+//     stops at the FIRST argument-taking letter, like the slot rule does.
+//   - a value flag's operand is its ARGUMENT and reads nothing, so it is excused,
+//     except for the flags whose operand IS a file (FILE_OPERAND_FLAGS). Without
+//     that, the headline false positive was fixed in only one of its spellings.
+// /code-review round 3 found eight more, four of them bypasses, and two were
+// shapes no flag table could have covered:
+//   - a lone `-` is not a flag. Every one of these tools takes it as the PATTERN,
+//     so `grep - KEY` printed the key while the engine excused it as the pattern
+//     slot. It is UNKNOWN now, and unknown excuses nothing.
+//   - a DYNAMIC pattern word (`grep "$PAT" KEY`) occupies no slot, so the FILE
+//     slid into slot 0 and was excused. Once a dynamic word appears ahead of a
+//     candidate, nothing is excused: the pattern may BE that word.
+//   - an `=` token consumes no following word, but only if we RECOGNISE the flag.
+//     `grep --config=KEY` opens the key on ugrep, and `--include-from=` /
+//     `--ignore-files=` have no separated spelling to fall back on. An unknown
+//     `=` value is now judged, scoped to the verbs whose option table we have so
+//     that `sort --output=KEY` (a WRITE, the CI key-install case) stays alone.
+//   - ripgrep's `-g/--glob/--iglob` decide which files it SEARCHES, so a glob
+//     naming a credential makes rg open it. They join grep's `--include` in the
+//     file-operand table, and the derived spec split moved with them.
+// Plus three false positives: 23 real ripgrep switches were in neither set, a
+// `-tconfig` attached operand was read as a bundle containing `-f`, and
+// `rg --pcre2` resolved to `--pcre2-version`.
+// /code-review round 4 found one more bypass, one more false-positive class, and
+// a defect in the TEST rather than the code:
+//   - `--` ends the options, so the next word is the pattern whatever it looks
+//     like. positionedArgs does not honour it, so `grep -v -- -zzzz KEY` gave the
+//     credential slot 0 and printed the whole key.
+//   - both flag tables are now EXTRACTED from the installed binaries
+//     (`/usr/bin/grep --help`, `rg --help`) rather than written from memory. 41
+//     real ripgrep switches had been in neither set, so ordinary searches like
+//     `rg --sort-files .env src` still blocked. An earlier comment claiming rg was
+//     not installed is why that table shipped incomplete for two rounds.
+//   - the DERIVED spec rows could not catch a flag MOVED between the two sets,
+//     because moving it moves its own test row: mutation-proved by relocating
+//     grep's `-b`, which flipped `grep -b foo KEY` to allow with every jail spec
+//     still green. The guard is now an independently typed list plus a pinned
+//     inventory, and the same mutation now fails two blocks.
+// /code-review round 5 found two bypasses and a second mutation escape:
+//   - the `--` fix from round 4 excused the word after `--` unconditionally, so
+//     `grep TODO -- KEY` -- pattern already given, `--` then naming a FILE --
+//     excused the credential and printed the key. The slot walk now resolves the
+//     pattern POSITION the way the tool's own parser does, left to right, and that
+//     one walk replaces every special case (dynamic word, `--`, value flag,
+//     unknown flag).
+//   - the copy tier's in-jail DESTINATION guard was keyed on the destination
+//     alone, so `cp ~/.ssh/id_rsa /tmp/.ssh/k` produced no finding: `/tmp/.ssh/`
+//     matches the same rule the real jail does. The SOURCE decides now -- no
+//     jailed source is an install, the same directory is a rename, anywhere else
+//     is the credential leaving.
+//   - the size-based table pin missed a SAME-SIZE swap (`--label` and
+//     `--initial-tab` traded sets, 1887 tests green, `grep --initial-tab pat KEY`
+//     flipped to allow). The pin now hashes the sorted CONTENTS of both sets.
+// /code-review round 6: the single walk HELD against a 12,631-row differential
+// corpus (every flag in both tables crossed with `--`, lone `-`, unknown flags,
+// `=` forms, `-NUM`, dynamic words, bundles and attached operands in nine argv
+// shapes). Four remaining fixes, three of them in the copy tier's flag parsing:
+//   - `flagInfo` reads a short bundle's LAST letter, so `cp -ttmp KEY` never saw
+//     the target-directory flag and `mv -tout KEY` mistook the credential for the
+//     target DIRECTORY. Both produced no finding. The first `t` is the flag now.
+//   - `dirOf` of a bare name returned the name, so `mv .env .env.local` began to
+//     prompt while its absolute spelling stayed quiet.
+//   - an `=` token cannot consume the next word in getopt_long or clap, so
+//     returning UNKNOWN for an unrecognised one bought nothing and hard-blocked
+//     `grep --group-separator=--- -A1 .env notes.md`. The VALUE is still judged.
+//   - the UNKNOWN abort had no test row: neutering it left 1995 tests green while
+//     round 2's measured bypass returned. It has its own witness now.
+// /code-review round 7 found the last bypass of this series, in the COPY tier's
+// bundle parsing rather than the pattern slot: `cp -St ~/.ssh/id_rsa /tmp/stolen`
+// copies the key on coreutils 9.4 and produced no finding, because a `t` anywhere
+// in a short bundle was read as --target-directory when `-S` (backup suffix) had
+// already swallowed it. The verbs now declare which LETTERS take an argument, and
+// the first of them owns the rest of the token, the way getopt reads it. Also:
+// `rg --maxdepth` is an ALIAS of `--max-depth` and takes a value (the round-5
+// extraction read alias lines as switches), and the flagOperand shape missed a
+// short attached source (`az ... -f/path`).
+//
+// Six arms that changed behaviour with NO test row were found by mutation and now
+// have witnesses: both lone-dash guards, the short-bundle UNKNOWN arm, the
+// ambiguous-abbreviation arm, operandOf's attached-value check, and the in-jail
+// exemption's `every`. Each mutant is re-killed by the row written for it.
+// /code-review round 8: the round-7 bundle fix was applied to the target-directory
+// flag only, and the same wrong model was still live for skipFlags. Measured with
+// `tar tf` and `unzip -l`: `tar -f out.tar -cVconf KEY` and `zip out.zip -rPx KEY`
+// archive the credential and produced no finding, because the bundle was named by
+// its LAST letter. Every copy verb with short value flags now declares them, and a
+// DERIVED spec row pins that the two tables agree (a letter that names an operand
+// to skip must also be known to take one) -- which immediately caught `7z`'s
+// inline-only `-x` and zip's missing `-x`/`-i`.
+// The pattern slot had one more `--` hole of the same family: round 5 taught the
+// WALK that `--` ends the options and left the flag-operand EXCUSAL loops behind,
+// so `grep -- -m KEY` excused the credential as `-m`'s operand while GNU grep
+// opened and printed it.
+// /code-review round 9: round 8's two fixes were correct where they landed and
+// the generalisation claim was not. Both mistakes were still live elsewhere, all
+// measured on the real binaries:
+//   - the copy tier excused flag operands PAST `--`: `rsync -- --exclude KEY rdst/`
+//     transferred the key, `tar -c -f o.tar -- --exclude ~/.ssh` archived it,
+//     `cp -t dst -- -t KEY` copied it, each with no finding.
+//   - find treated `--` as its first PREDICATE, so every start point was erased:
+//     `find -- ~/.ssh -type f -exec cat {} +` was silent while the same command
+//     without `--` blocked.
+//   - a BARE tar key consumed exactly one word, so `tar cCf ~/.ssh out.tar .`
+//     gave the jailed directory to the archive slot and dropped it. Each value
+//     letter in the key takes one word, in key order, and `-C DIR` in a writing
+//     mode is the directory archived FROM.
+// Plus a long source flag now resolves by getopt prefix (`az ... --fil KEY`), and
+// rsync's `-z` left the value set, where it never belonged.
+// Verdict snapshot over 390 corpus commands: 8 moved, all of them rows the
+// legitimate-use corpus already marks as false positives, 0 attack rows, 0
+// loosened in the file slot. The last row is the honest residue: sed and awk
+// keep their false positive until stage 5b gives them an in-program file grammar.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -364,7 +588,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v14';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '8b5729fe236a195b';
+export const CANONICAL_EXTRACTOR_HASH = '5dad4c8f07121f6c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

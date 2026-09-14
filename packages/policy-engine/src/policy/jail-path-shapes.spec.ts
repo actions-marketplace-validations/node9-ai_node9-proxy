@@ -80,6 +80,11 @@ describe('jail matchers — every path shape, both lists', () => {
     expect(analyzeFsOperation('rg .aws src/')).toBeNull();
   });
 
+  // ⚠️ STILL OPEN, now scoped as stage 5b (2026-09-13). Stage 5a excused the
+  // pattern slot for grep/egrep/fgrep/rg and deliberately NOT for sed/awk: an
+  // awk program can read a file from inside itself (`getline < "KEY"`, sed `r
+  // KEY`), so excusing that slot turned an exfil-corpus row into a bypass in the
+  // prototype run. sed and awk need an in-program file grammar first.
   // ⚠️ PRE-EXISTING and out of scope: `sed -i s/.aws/x/ f.txt` blocks on
   // shipped code, because the sed expression `s/.aws/x/` carries separators on
   // both sides and reads as a path. `s#.aws#x#` with a different delimiter

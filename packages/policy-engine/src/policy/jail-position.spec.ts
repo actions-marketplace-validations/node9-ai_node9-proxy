@@ -138,3 +138,14 @@ describe('stage 4 consumes position', () => {
     expect(analyzeFsOperation(`cp ${K} /tmp/k`)?.verdict).toBe('review');
   });
 });
+
+// Stage 5a (2026-09-13) is the SECOND consumer of position: the slot says which
+// word of a reader is its search PATTERN. Same two rows, one slot apart -- the
+// shortest statement of what position bought. Full coverage in
+// jail-pattern-slot.spec.ts.
+describe('stage 5a consumes position', () => {
+  it('the pattern slot is excused and the file slot is not', () => {
+    expect(analyzeFsOperation(`grep -rn ${K} docs/`)).toBeNull();
+    expect(analyzeFsOperation(`grep -rn foo ${K}`)?.verdict).toBe('block');
+  });
+});
