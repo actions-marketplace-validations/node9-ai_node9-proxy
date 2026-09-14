@@ -8,13 +8,13 @@
 //
 // Config inspection only — no MCP server is launched or contacted.
 
-import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { parse as parseToml } from 'smol-toml';
 import { checkProvenance } from '../utils/provenance';
 import { AGENT_SPECS } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
+import { readCappedText } from '../utils/read-capped';
 
 interface McpEntry {
   name: string;
@@ -54,9 +54,10 @@ const MAX_CONFIG_BYTES = 10 * 1024 * 1024;
 /** Parse an agent's MCP config into server entries. Malformed/absent → []. */
 function readServers(file: string, format: 'json' | 'toml', agent: string): McpEntry[] {
   try {
-    const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) return [];
-    const text = fs.readFileSync(file, 'utf8');
+    // Cap enforced by the read; see read-capped.ts.
+    const capped = readCappedText(file, MAX_CONFIG_BYTES);
+    if (!capped || capped.truncated) return [];
+    const text = capped.text;
     const map = (
       format === 'toml'
         ? (parseToml(text) as { mcp_servers?: Record<string, McpServerConfig> })?.mcp_servers

@@ -6,6 +6,7 @@ import path from 'path';
 import { type RiskMetadata } from '../context-sniper';
 import { HOOK_DEBUG_LOG } from '../audit';
 import { safeMessage } from '../utils/safe-text';
+import { readCappedText } from '../utils/read-capped';
 
 export interface CloudApprovalResult {
   approved: boolean;
@@ -224,9 +225,12 @@ export async function initNode9SaaS(
   if (process.env.CI) {
     try {
       const ciContextPath = path.join(os.homedir(), '.node9', 'ci-context.json');
-      const stats = fs.statSync(ciContextPath);
-      if (stats.size > 10_000) throw new Error('ci-context.json exceeds 10 KB');
-      const raw = fs.readFileSync(ciContextPath, 'utf8');
+      // Cap enforced by the read, not by a prior stat: the agent writes this
+      // file, so a swap between the two would defeat the 10 KB limit.
+      const ci = readCappedText(ciContextPath, 10_000);
+      if (!ci) throw new Error('ci-context.json unreadable');
+      if (ci.truncated) throw new Error('ci-context.json exceeds 10 KB');
+      const raw = ci.text;
       const parsed = JSON.parse(raw) as unknown;
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('ci-context.json is not a plain object');

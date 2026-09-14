@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { readCapped } from './utils/read-capped';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,14 +88,16 @@ function walkDir(root: string): string[] {
         continue;
       }
       if (!lst.isFile()) continue;
-      if (totalBytes + lst.size > MAX_TOTAL_BYTES) continue;
-      try {
-        const buf = fs.readFileSync(full);
-        totalBytes += buf.length;
-        out.push({ rel, hash: sha256Bytes(buf) });
-      } catch {
-        /* permission/race — skip */
-      }
+      // Budget enforced by the read rather than by lst.size: the cap is
+      // cumulative, and a file swapped after the lstat would blow it.
+      // `truncated` reproduces the old skip-the-file behaviour exactly, and
+      // readCapped returns raw bytes because these are hashed.
+      const remaining = MAX_TOTAL_BYTES - totalBytes;
+      if (remaining <= 0) continue;
+      const capped = readCapped(full, remaining);
+      if (!capped || capped.truncated) continue;
+      totalBytes += capped.bytes.length;
+      out.push({ rel, hash: sha256Bytes(capped.bytes) });
     }
   };
 
