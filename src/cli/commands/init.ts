@@ -17,6 +17,7 @@ import {
 } from '../../daemon/service';
 import { getConfig } from '../../core';
 import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
+import { atomicWriteSync } from '../../utils/atomic-write';
 
 // Three universally-applicable shields. Why these specifically:
 //   - bash-safe   — blocks curl|bash, rm -rf /, eval-of-remote. Universal value.
@@ -178,7 +179,7 @@ export function registerInitCommand(program: Command): void {
             if (settings.mode !== chosenMode) {
               settings.mode = chosenMode;
               existing.settings = settings;
-              fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
+              atomicWriteSync(configPath, JSON.stringify(existing, null, 2) + '\n');
               console.log(chalk.green(`✅ Mode updated: ${chosenMode}`));
             } else {
               console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
@@ -192,9 +193,7 @@ export function registerInitCommand(program: Command): void {
             settings: { ...DEFAULT_CONFIG.settings, mode: chosenMode },
           };
 
-          const dir = path.dirname(configPath);
-          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-          fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2) + '\n');
+          atomicWriteSync(configPath, JSON.stringify(configToSave, null, 2) + '\n');
 
           console.log(chalk.green(`✅ Config created: ${configPath}`));
           console.log(chalk.gray(`   Mode: ${chosenMode}`));
