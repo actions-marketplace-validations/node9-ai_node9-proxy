@@ -35,10 +35,11 @@ jobs:
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: javascript-typescript
-          # security-and-quality adds the quality queries on top of the default
-          # security set; the extra findings are mostly maintainability, and they
-          # arrive as alerts. Start with security-extended and widen deliberately.
-          queries: security-extended
+          # Suite and analysis scope both live in the config file so they stay
+          # in one place; see .github/codeql/codeql-config.yml for why tests and
+          # repo scripts are excluded. (security-and-quality would add the
+          # maintainability queries on top; widen there, deliberately.)
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Analyze
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
