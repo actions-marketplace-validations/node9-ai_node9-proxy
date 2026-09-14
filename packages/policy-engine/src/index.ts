@@ -86,6 +86,12 @@ export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules
 // Regex utilities — ReDoS-safe validation + LRU-cached compilation.
 export { validateRegex, getCompiledRegex } from './utils/regex';
 
+// Control-character / terminal-escape sanitizers. One home for what used to be
+// nine copies of three regexes across the proxy and the engine. Three
+// functions, not one: see the module header for why flattening them corrupts
+// scan previews.
+export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/safe-text';
+
 // Shields — 11 builtin definitions + pure validators (no fs).
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
 export {
@@ -117,7 +123,7 @@ export {
 // a network-safe summary the proxy pushes to the SaaS on every policy-sync
 // tick. Pure: host code does the I/O, engine sanitises + sorts.
 export type { BlastFinding, BlastEnvFinding, BlastResult, BlastSummary } from './blast';
-export { summarizeBlast, truncateBlastPath } from './blast';
+export { summarizeBlast, truncateBlastPath, MAX_BLAST_PATH } from './blast';
 
 // Scan summarization — forward-only watermark scanner output, reduced to
 // counts-only summary the proxy pushes to the SaaS on every policy-sync

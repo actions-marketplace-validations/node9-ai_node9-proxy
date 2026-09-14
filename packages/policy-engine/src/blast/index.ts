@@ -69,6 +69,12 @@ export interface BlastSummary {
 }
 
 /**
+ * Longest path `truncateBlastPath` will look at, tail-anchored. PATH_MAX is
+ * 4096 on Linux, so anything past this is not a path we could have read.
+ */
+export const MAX_BLAST_PATH = 4096;
+
+/**
  * Sanitise a sensitive path for transmission. Keeps only the trailing 2
  * segments — enough to identify the kind of file ("~/.aws/credentials"
  * stays useful, "/Users/alice/Code/payments-prod/.env" becomes
@@ -83,8 +89,20 @@ export interface BlastSummary {
  */
 export function truncateBlastPath(full: string): string {
   if (!full) return '';
-  // Strip trailing separator, then split on / OR \ to handle Windows.
-  const cleaned = full.replace(/[/\\]+$/, '');
+  // The tail is all this function ever returns, so cap from the end: a path
+  // longer than this is pathological input, not a real file. Bounds the split
+  // below without changing the result for any plausible path.
+  if (full.length > MAX_BLAST_PATH) full = full.slice(-MAX_BLAST_PATH);
+  // Strip trailing separators, then split on / OR \ to handle Windows.
+  //
+  // Walked by index rather than /[/\\]+$/: that regex is retried from every
+  // start index and backtracks through the whole run at each one, so a path of
+  // separators followed by any other character costs O(n^2). The path comes
+  // from a tool call, so its shape is agent-controlled (CodeQL
+  // js/polynomial-redos).
+  let end = full.length;
+  while (end > 0 && (full[end - 1] === '/' || full[end - 1] === '\\')) end--;
+  const cleaned = full.slice(0, end);
   const parts = cleaned.split(/[/\\]+/).filter((p) => p.length > 0);
   if (parts.length <= 2) {
     // Preserve leading "~" if present (path was already home-relative).

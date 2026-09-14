@@ -35,11 +35,7 @@ import {
   canonicalToolInput,
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
-
-function sanitize(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1F\x7F]/g, '');
-}
+import { stripControlChars } from '../../utils/safe-text';
 
 /**
  * Identify the AI agent running this tool call. Source of truth for the
@@ -545,9 +541,14 @@ export function registerCheckCommand(program: Command): void {
             const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
             if (!fs.existsSync(path.dirname(logPath)))
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
-            fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
+            // JSON-encode: `raw` is agent-supplied and a literal newline in it
+            // would forge a second journal line. Matches the sibling at :277.
+            fs.appendFileSync(
+              logPath,
+              `[${new Date().toISOString()}] STDIN: ${JSON.stringify(raw)}\n`
+            );
           }
-          const rawToolName = sanitize(extractToolName(payload));
+          const rawToolName = stripControlChars(extractToolName(payload));
           const toolName = canonicalToolName(rawToolName);
           // Normalise agent-native arg shapes (agy run_command:
           // CommandLine/Cwd → command/cwd) before shields, DLP and

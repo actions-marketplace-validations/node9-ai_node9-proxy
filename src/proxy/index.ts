@@ -10,11 +10,7 @@ import { parseCommandString } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
 import { buildNegotiationMessage } from '../policy/negotiation';
 import { locatorCommand, shellInvocation } from '../utils/platform-shell';
-
-function sanitize(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1F\x7F]/g, '');
-}
+import { stripControlChars } from '../utils/safe-text';
 
 export async function runProxy(targetCommand: string) {
   const commandParts = parseCommandString(targetCommand);
@@ -83,7 +79,7 @@ export async function runProxy(targetCommand: string) {
         const toolArgs = message.params?.arguments || message.params?.tool_input || {};
 
         // Use our Race Engine to authorize
-        const result = await authorizeHeadless(sanitize(name), toolArgs, {
+        const result = await authorizeHeadless(stripControlChars(name), toolArgs, {
           agent: 'Proxy/MCP',
         });
 

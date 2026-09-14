@@ -1,0 +1,21 @@
+# CodeQL analysis scope for node9-proxy.
+#
+# The query suite stays `security-extended`: this repo is a security product,
+# and the extended suite is the right default for the code we ship. What it is
+# not the right default for is test fixtures and repo-local scripts, which
+# deliberately do things (predictable temp files, unauthenticated localhost
+# fetches) that are findings in product code and noise in a test.
+#
+# Keep this list to things that never reach a user's machine. `package.json`
+# ships only `dist`, so nothing matched below is published.
+name: node9-proxy CodeQL config
+
+queries:
+  - uses: security-extended
+
+paths-ignore:
+  - '**/__tests__/**'
+  - '**/*.spec.ts'
+  - '**/*.test.ts'
+  - 'scripts/**'
+  - 'comment.js'
