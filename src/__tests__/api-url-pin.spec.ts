@@ -62,6 +62,32 @@ describe('validateApiUrl', () => {
   });
 });
 
+describe('the host pin cannot widen to a whole TLD', () => {
+  // The first version took "the last two labels" as the registrable domain.
+  // That reads api.node9.co.uk as co.uk and would accept every host in the TLD.
+  it('never accepts a bare public suffix as the allowed domain', () => {
+    for (const host of ['co.uk', 'com.au', 'co.il', 'ai', 'com']) {
+      expect(validateApiUrl(`https://evil.${host}/v1`), host).toBeNull();
+    }
+  });
+
+  it('accepts only the default host and its immediate parent', () => {
+    expect(validateApiUrl('https://node9.ai/x')).not.toBeNull();
+    expect(validateApiUrl('https://a.b.node9.ai/x')).not.toBeNull();
+    expect(validateApiUrl('https://node9.ai.evil.com/x')).toBeNull();
+  });
+});
+
+describe('one home for DEFAULT_API_URL', () => {
+  it('is what node9 login writes and what the pin validates', async () => {
+    // Two copies would let login write a URL its own pin then rejects, and
+    // every login would silently fall back. Assert they are literally the same.
+    const written = await import('../credentials.js');
+    expect(validateApiUrl(DEFAULT_API_URL)).not.toBeNull();
+    expect(typeof written.writeCredentialsAndConfig).toBe('function');
+  });
+});
+
 describe('safeApiUrl', () => {
   it('falls back to the real endpoint instead of disabling the cloud', () => {
     const seen: unknown[] = [];
@@ -123,7 +149,7 @@ describe('getCredentials refuses a redirected key at the source', () => {
 
   it('THE REPRO: an agent-rewritten apiUrl does not reach any consumer', async () => {
     writeCreds('https://evil.example.com/v1');
-    const { getCredentials } = await import('../config');
+    const { getCredentials } = await import('../config/index.js');
     const creds = getCredentials();
     expect(creds?.apiKey).toBe('nk_test_key');
     expect(creds?.apiUrl).toBe(DEFAULT_API_URL);
@@ -132,14 +158,27 @@ describe('getCredentials refuses a redirected key at the source', () => {
 
   it('leaves a legitimate apiUrl alone', async () => {
     writeCreds('https://dev-api.node9.ai/api/v1/intercept');
-    const { getCredentials } = await import('../config');
+    const { getCredentials } = await import('../config/index.js');
     expect(getCredentials()?.apiUrl).toBe('https://dev-api.node9.ai/api/v1/intercept');
+  });
+
+  it('records a rejection once, not once per call', async () => {
+    // getCredentials re-reads the file every call and runs on the hook path.
+    // Unguarded, 25 calls wrote 25 lines into a log already tens of MB.
+    writeCreds('https://evil.example.com/v1');
+    const { getCredentials } = await import('../config/index.js');
+    for (let i = 0; i < 25; i++) getCredentials();
+    const log = path.join(home, '.node9', 'hook-debug.log');
+    const lines = fs.existsSync(log)
+      ? fs.readFileSync(log, 'utf-8').split('\n').filter(Boolean).length
+      : 0;
+    expect(lines).toBe(1);
   });
 
   it('guards the env path too, since a hook inherits the agent env', async () => {
     process.env.NODE9_API_KEY = 'nk_env_key';
     process.env.NODE9_API_URL = 'https://evil.example.com/v1';
-    const { getCredentials } = await import('../config');
+    const { getCredentials } = await import('../config/index.js');
     expect(getCredentials()?.apiUrl).toBe(DEFAULT_API_URL);
   });
 });

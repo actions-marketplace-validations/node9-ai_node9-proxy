@@ -33,7 +33,7 @@ import { classifySsrf } from '@node9/policy-engine';
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
 import { BUILTIN_SHIELDS } from '@node9/policy-engine';
-import { safeApiUrl } from '../auth/api-url';
+import { safeApiUrl, DEFAULT_API_URL } from '../auth/api-url';
 
 /**
  * A tier-1 address has no allow path, for ANY layer: not the local file, not a
@@ -593,7 +593,16 @@ export function getGlobalSettings(): {
  * thrown: getCredentials runs on the hook hot path and must never break a tool
  * call. The caller still gets the real endpoint, so the redirect simply fails.
  */
+const rejectedApiUrlsSeen = new Set<string>();
+
 function noteRejectedApiUrl(raw: unknown): void {
+  // Once per offending value per process. getCredentials re-reads the file on
+  // every call and runs on the hook path, so an unguarded append writes a line
+  // per tool call: measured 25 lines from 25 calls. On a tampered machine that
+  // is an unbounded disk fill in a log that is already tens of megabytes.
+  const key = String(raw).slice(0, 200);
+  if (rejectedApiUrlsSeen.has(key)) return;
+  rejectedApiUrlsSeen.add(key);
   try {
     fs.appendFileSync(
       path.join(os.homedir(), '.node9', 'hook-debug.log'),
@@ -616,7 +625,7 @@ export function getCredentials(): {
    *  (CI) have no localOnly channel — always fully keyed. */
   localOnly?: boolean;
 } | null {
-  const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept';
+  // DEFAULT_API_URL is imported: see auth/api-url, which pins against it.
   if (process.env.NODE9_API_KEY) {
     return {
       apiKey: process.env.NODE9_API_KEY,

@@ -27,13 +27,23 @@ const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0.0.0.0']);
  */
 export const HOST_ALLOW_ENV = 'NODE9_API_HOST_ALLOW';
 
-function registrableSuffix(host: string): string {
-  const parts = host.toLowerCase().split('.');
-  return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
+/**
+ * The default endpoint's host, and its parent when that parent is not a public
+ * suffix. `api.node9.ai` yields both `api.node9.ai` and `node9.ai`, so
+ * `dev-api.node9.ai` and `staging.node9.ai` are accepted without a list.
+ *
+ * Deliberately NOT "the last two labels": that reads `api.node9.co.uk` as
+ * `co.uk` and would accept every host in the TLD. Only one label is dropped,
+ * and only when what remains still has a dot, so the widest this can ever get
+ * is one registrable domain.
+ */
+function defaultHostSuffixes(): string[] {
+  const host = new URL(DEFAULT_API_URL).hostname.toLowerCase();
+  const parent = host.split('.').slice(1).join('.');
+  return parent.includes('.') ? [host, parent] : [host];
 }
 
 function allowedSuffixes(): string[] {
-  const base = registrableSuffix(new URL(DEFAULT_API_URL).hostname);
   const extra = (process.env[HOST_ALLOW_ENV] ?? '')
     .split(',')
     .map((s) =>
@@ -43,7 +53,7 @@ function allowedSuffixes(): string[] {
         .replace(/^\*?\./, '')
     )
     .filter(Boolean);
-  return [base, ...extra];
+  return [...defaultHostSuffixes(), ...extra];
 }
 
 /**
@@ -58,6 +68,15 @@ function allowedSuffixes(): string[] {
  * Rejected: every other host, any non-http(s) scheme, and userinfo — the key
  * already travels in the Authorization header, so `https://x@real.host` is only
  * ever an attempt to confuse a reader.
+ *
+ * ⚠️ LOOPBACK IS NOT CLOSED, and the limit is deliberate. An agent that can
+ * rewrite credentials.json can also start a listener on 127.0.0.1 and have the
+ * key delivered there, then forward it. That is the exact shape of the original
+ * repro. Loopback stays accepted because local development and the test suite
+ * need it (`https://localhost:1`, `http://127.0.0.1:9`), so this closes the
+ * REMOTE redirect and not the local relay. The local relay is a smaller win for
+ * an attacker who already has shell — it can read the file directly — but it is
+ * open, and the gap belongs in the doc rather than in a claim that it is shut.
  */
 export function validateApiUrl(raw: unknown): URL | null {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > 2048) return null;
