@@ -33,6 +33,7 @@ import { classifySsrf } from '@node9/policy-engine';
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
 import { BUILTIN_SHIELDS } from '@node9/policy-engine';
+import { safeApiUrl } from '../auth/api-url';
 
 /**
  * A tier-1 address has no allow path, for ANY layer: not the local file, not a
@@ -586,6 +587,25 @@ export function getGlobalSettings(): {
   };
 }
 
+/**
+ * A rejected apiUrl means the credentials file or the environment named a
+ * destination this machine may not send its device key to. Recorded rather than
+ * thrown: getCredentials runs on the hook hot path and must never break a tool
+ * call. The caller still gets the real endpoint, so the redirect simply fails.
+ */
+function noteRejectedApiUrl(raw: unknown): void {
+  try {
+    fs.appendFileSync(
+      path.join(os.homedir(), '.node9', 'hook-debug.log'),
+      `[${new Date().toISOString()}] REFUSED apiUrl, using the default instead: ${String(raw)
+        .slice(0, 200)
+        .replace(/[\r\n]+/g, ' ')}\n`
+    );
+  } catch {
+    /* best effort: never break a tool call over a log write */
+  }
+}
+
 export function getCredentials(): {
   apiKey: string;
   apiUrl: string;
@@ -600,7 +620,9 @@ export function getCredentials(): {
   if (process.env.NODE9_API_KEY) {
     return {
       apiKey: process.env.NODE9_API_KEY,
-      apiUrl: process.env.NODE9_API_URL || DEFAULT_API_URL,
+      // NODE9_API_URL is env, and a hook inherits the agent's env, so it is
+      // no more trusted than the file below.
+      apiUrl: safeApiUrl(process.env.NODE9_API_URL || DEFAULT_API_URL, noteRejectedApiUrl),
     };
   }
   try {
@@ -613,14 +635,14 @@ export function getCredentials(): {
       if (profile?.apiKey) {
         return {
           apiKey: profile.apiKey as string,
-          apiUrl: (profile.apiUrl as string) || DEFAULT_API_URL,
+          apiUrl: safeApiUrl(profile.apiUrl || DEFAULT_API_URL, noteRejectedApiUrl),
           localOnly: profile.localOnly === true || profileName !== 'default',
         };
       }
       if (creds.apiKey) {
         return {
           apiKey: creds.apiKey as string,
-          apiUrl: (creds.apiUrl as string) || DEFAULT_API_URL,
+          apiUrl: safeApiUrl(creds.apiUrl || DEFAULT_API_URL, noteRejectedApiUrl),
           localOnly: creds.localOnly === true,
         };
       }
