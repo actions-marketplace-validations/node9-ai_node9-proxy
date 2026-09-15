@@ -16,6 +16,7 @@ import { scanText } from '@node9/policy-engine';
 import { AGENT_SPECS } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 import { loadCanaries } from '../canary/registry';
+import { readCappedText } from '../utils/read-capped';
 
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -31,13 +32,11 @@ function displayPath(p: string, home: string): string {
 
 /** Read a file as text with a size cap; null on any error (missing/binary/perm). */
 function safeRead(file: string): string | null {
-  try {
-    const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_FILE_BYTES) return null;
-    return fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  // Cap enforced by the read: posture walks paths this process does not own,
+  // so a stat-then-read guard is exactly what a swap defeats.
+  const r = readCappedText(file, MAX_FILE_BYTES);
+  if (!r || r.truncated || r.text.length === 0) return null;
+  return r.text;
 }
 
 /** Candidate files that commonly hold plaintext secrets. */

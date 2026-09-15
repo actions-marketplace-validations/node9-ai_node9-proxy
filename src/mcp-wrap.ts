@@ -168,7 +168,16 @@ export function writeMcpEntry(
     // already-wrapped file, losing the true original.) Per-server reversibility
     // is separate: fromGateway reads the original out of the embedded --upstream.
     const bak = `${mcpFile}.node9-bak`;
-    if (!fs.existsSync(bak)) fs.writeFileSync(bak, raw, { mode: 0o600 });
+    // Exclusive create rather than existsSync-then-write: this backup holds
+    // the user's pristine original, and a concurrent wrap between the check
+    // and the write would overwrite it with already-wrapped content. Same
+    // guard canary/plant.ts already uses.
+    try {
+      fs.writeFileSync(bak, raw, { mode: 0o600, flag: 'wx' });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      // Backup already present; never overwrite it.
+    }
   }
   const existing = root[key];
   const servers: Record<string, McpServer> =
