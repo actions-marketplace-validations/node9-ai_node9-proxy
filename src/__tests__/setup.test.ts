@@ -2067,7 +2067,20 @@ function withHermesConfig(yamlText: string, extraFiles: Record<string, string> =
 }
 
 function writtenRaw(filePath: string): string | null {
-  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => toPosix(p) === filePath);
+  // Follow atomic writes. An atomicWriteSync lands the bytes on a temp path and
+  // then renames it, so filtering writeFileSync by the FINAL path finds nothing
+  // even though the file was written. Resolve each write through any rename
+  // that later moved it, then take the last one that ended up at filePath.
+  const renames = vi
+    .mocked(fs.renameSync)
+    .mock.calls.map(([from, to]) => [toPosix(from), toPosix(to)] as const);
+  const destOf = (written: string): string => {
+    const moved = renames.filter(([from]) => from === written);
+    return moved.length ? moved[moved.length - 1][1] : written;
+  };
+  const calls = vi
+    .mocked(fs.writeFileSync)
+    .mock.calls.filter(([p]) => destOf(toPosix(p)) === filePath);
   if (calls.length === 0) return null;
   return String(calls[calls.length - 1][1]);
 }

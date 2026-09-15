@@ -10,6 +10,7 @@ import { seedMcpPinsIfMissing } from './mcp-pin';
 import { recordHookBaseline } from './daemon/hook-baseline';
 import { renderOpencodeShim } from './setup-opencode-shim';
 import { renderPiShim } from './setup-pi-shim';
+import { atomicWriteSync } from './utils/atomic-write';
 
 // Non-interactive guard for setup prompts. Under `curl | sh` (no TTY) or when a
 // caller (e.g. `node9 connect`, or an installer one-liner) sets
@@ -2767,7 +2768,7 @@ export function setupHermes(): void {
   }
 
   if (anythingChanged) {
-    fs.writeFileSync(configPath, doc.toString());
+    atomicWriteSync(configPath, doc.toString());
   }
 
   // ── 2. ~/.hermes/shell-hooks-allowlist.json ──────────────────────────────
@@ -2804,8 +2805,7 @@ export function setupHermes(): void {
   }
 
   if (allowlistChanged) {
-    fs.mkdirSync(path.dirname(allowlistPath), { recursive: true });
-    fs.writeFileSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
+    atomicWriteSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
     console.log(chalk.green('  ✅ Hermes shell-hooks allowlist populated'));
     anythingChanged = true;
   }
@@ -2907,7 +2907,7 @@ function teardownHermesAllowlist(allowlistPath: string): void {
     );
     if (allowlist.approvals.length === before) return;
 
-    fs.writeFileSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
+    atomicWriteSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
     console.log(chalk.green(`  ✅ Removed Node9 entries from ${allowlistPath}`));
   } catch {
     // Corrupt allowlist on teardown — leave it alone; user can delete
