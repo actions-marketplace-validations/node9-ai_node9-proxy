@@ -11,6 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { atomicWriteSync } from '../../utils/atomic-write';
 
 export interface ScanHistoryRecord {
   /** ISO 8601 timestamp at which this scan ran. */
@@ -83,7 +84,7 @@ export function appendScanHistory(
     if (history.length > cap) {
       history = history.slice(history.length - cap);
     }
-    fs.writeFileSync(filePath, JSON.stringify(history, null, 2));
+    atomicWriteSync(filePath, JSON.stringify(history, null, 2));
   } catch (err) {
     process.stderr.write(
       `[node9] Warning: could not write scan-history.json: ${(err as Error).message}\n`

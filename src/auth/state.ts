@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { matchesPattern } from '../policy';
+import { atomicWriteSync } from '../utils/atomic-write';
 
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
 const TRUST_FILE = path.join(os.homedir(), '.node9', 'trust.json');
@@ -51,14 +52,6 @@ export function checkPause(): { paused: boolean; expiresAt?: number; duration?: 
   }
 }
 
-function atomicWriteSync(filePath: string, data: string, options?: fs.WriteFileOptions): void {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${filePath}.${os.hostname()}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpPath, data, options);
-  fs.renameSync(tmpPath, filePath);
-}
-
 export function pauseNode9(durationMs: number, durationStr: string): void {
   const state: PauseState = { expiry: Date.now() + durationMs, duration: durationStr };
   atomicWriteSync(PAUSED_FILE, JSON.stringify(state, null, 2));
@@ -77,7 +70,10 @@ export function getActiveTrustSession(toolName: string, args?: unknown): boolean
     const now = Date.now();
     const active = trust.entries.filter((e) => e.expiry > now);
     if (active.length !== trust.entries.length) {
-      fs.writeFileSync(TRUST_FILE, JSON.stringify({ entries: active }, null, 2));
+      // Atomic, like writeTrustSession below. A plain writeFileSync here let a
+      // concurrent hook process read a truncated trust.json, whose parse failure
+      // is swallowed and reported as "no active trust session".
+      atomicWriteSync(TRUST_FILE, JSON.stringify({ entries: active }, null, 2));
     }
     return active.some((e) => {
       if (!(e.tool === toolName || matchesPattern(toolName, e.tool))) return false;
