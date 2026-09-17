@@ -8,6 +8,7 @@
 // These helpers are the single source of truth so the renderers stay
 // in sync. No I/O, no console — safe to unit-test.
 import chalk from 'chalk';
+import type { ChalkInstance } from 'chalk';
 import stringWidth from 'string-width';
 import type { Section } from '../../scan-summary';
 
@@ -20,7 +21,7 @@ export type ScoreBand = 'good' | 'at-risk' | 'critical';
 export interface ScoreClassification {
   band: ScoreBand;
   label: string; // 'Good' | 'At Risk' | 'Critical'
-  color: chalk.Chalk; // green / yellow / red — matches band
+  color: ChalkInstance; // green / yellow / red — matches band
 }
 
 /**

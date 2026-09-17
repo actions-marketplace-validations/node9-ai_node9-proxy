@@ -7,6 +7,7 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
+import type { ChalkInstance } from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import { classifyDecision } from '../../audit/decision';
@@ -722,7 +723,7 @@ function toolInputSummary(tool: string, input: Record<string, unknown>): string 
   return '';
 }
 
-function toolColor(tool: string): chalk.Chalk {
+function toolColor(tool: string): ChalkInstance {
   const t = tool.toLowerCase();
   if (t === 'bash' || t === 'execute_bash') return chalk.red;
   if (t === 'write') return chalk.green;
