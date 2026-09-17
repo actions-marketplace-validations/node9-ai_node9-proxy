@@ -1,18 +1,29 @@
-# OpenSSF Scorecard — QUIET MODE.
+# OpenSSF Scorecard — PUBLISHING.
 #
-# `publish_results: false` on purpose. Scorecard grades repository practice
-# (branch protection, pinned actions, review coverage, update tooling) and
-# publishing sends that grade to a public API that anyone can query and that
-# backs the public badge. Estimated before writing this: node9-proxy scores
-# somewhere near 5-6.5, with the losses concentrated in config files we have
-# not written yet — no dependabot, 1 of 14 actions pinned by SHA, no top-level
-# `permissions:` in ci.yml, no SAST workflow. Publishing that number before
-# fixing those is a durable public claim about a security product, made from a
-# starting line rather than a finish line.
+# This ran quietly from the day it was added, on the rule that a grade is a
+# durable public claim about a security product and should not be made from a
+# starting line. The condition it set was: close the cheap gaps first, then
+# publish. That is done.
 #
-# So: run it, read the SARIF from the build artifact, close the cheap gaps,
-# and only then flip publish_results to true and add the badge. Flipping it is
-# a one-word change; un-publishing a grade is not.
+#   estimated when quiet mode was written   5 to 6.5
+#   measured on main, 2026-09-17            8.1
+#
+# The last gap to close was Vulnerabilities, which read 9 for a single
+# low-severity dev dependency the package does not ship. It now reads 10, "0
+# existing vulnerabilities detected", confirmed twice: by the Scorecard run on
+# this commit and by `npm audit` against main's own lockfile in isolation. A
+# security product should not publish a card with a live advisory on it.
+#
+# What is NOT closed, deliberately, because publishing does not wait on it:
+# Code-Review scores 0 and will keep scoring 0 while one person merges their
+# own work, since GitHub does not allow approving your own pull request. That
+# also caps Branch-Protection. Neither is closable in code, and the published
+# number reflects it honestly rather than being gamed by a bot approval.
+#
+# ⚠️ The grade now refreshes on its own every Monday and after any branch
+# protection change. Publishing is a standing commitment to the number, not a
+# one-time act: a regression moves the public record without anyone deciding
+# to move it.
 #
 # Nothing here uploads to code scanning. A practice grade filed as dismissible
 # security alerts produces a queue that no code change can close.
@@ -31,8 +42,9 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
-      # id-token is only needed by publish_results (OIDC proof of authenticity).
-      # It is omitted while publishing is off, and must be added back with it.
+      # id-token carries the OIDC proof of authenticity that publish_results
+      # requires. It was omitted while publishing was off and is back with it.
+      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,10 +58,11 @@ jobs:
           # check's score, which is what a quiet run exists to show us.
           results_file: results.json
           results_format: json
-          publish_results: false
+          publish_results: true
 
-      # The grade lives here and nowhere else while publishing is off. Download
-      # it from the run's Artifacts, or read the per-check lines in the job log.
+      # The artifact stays even though the grade is public now: the API serves
+      # the headline score, the JSON here carries every check's reason, which
+      # is what you read when a number moves and you want to know why.
       - name: Upload Scorecard results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
