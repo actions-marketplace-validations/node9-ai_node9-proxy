@@ -164,7 +164,7 @@ node9 login      # connect this machine to your workspace (approve it in the bro
 node9 doctor     # verify everything is wired and reporting
 ```
 
-Requires Node.js 18+.
+Requires Node.js 22+.
 
 `init` on its own gives you full local enforcement: rules, shields, DLP and
 approvals all work offline, on this machine.
