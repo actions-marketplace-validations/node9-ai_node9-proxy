@@ -332,3 +332,41 @@ describe('todays egress block row identity', () => {
     expect('observe-mode-ssrf-egress-would-block').toContain('egress');
   });
 });
+
+// ── IPv6 under allowPrivate ─────────────────────────────────────────────────
+// Measured 2026-09-20 through this harness before the fix: under
+// block + allowPrivate:true the shell extractor hands `[::1]` over with the
+// brackets and isPrivateHost said false, so a local IPv6 dev server was
+// DENIED while 127.0.0.1 was allowed. A false positive, not a bypass. The fix
+// is isPrivateHost reading the address through classifySsrf; these rows pin
+// the gate, not the function.
+describe('IPv6 private hosts under allowPrivate (real gate)', () => {
+  const open = { enabled: true, mode: 'block', allow: [], deny: [], allowPrivate: true };
+  const strict = { enabled: true, mode: 'block', allow: [], deny: [], allowPrivate: false };
+
+  it('KNOWN-TRUE: IPv4 loopback is allowed under block + allowPrivate', () => {
+    home = makeHome(open);
+    expect(check(home, 'curl http://127.0.0.1:3000/x').decision).toBe('allow');
+  });
+
+  it.each([
+    ['V1 IPv6 loopback', 'curl http://[::1]:3000/x'],
+    ['V2 unique-local', 'curl http://[fd00::1]:3000/x'],
+    ['V3 IPv4-mapped loopback', 'curl http://[::ffff:7f00:1]:3000/x'],
+  ])('%s is allowed under block + allowPrivate, like 127.0.0.1', (_id, cmd) => {
+    home = makeHome(open);
+    expect(check(home, cmd).decision).toBe('allow');
+  });
+
+  it('V4 IPv6 loopback is still denied when allowPrivate is off, like 127.0.0.1', () => {
+    home = makeHome(strict);
+    expect(check(home, 'curl http://[::1]:3000/x').decision).toBe('deny');
+  });
+
+  it("V5 link-local stays the floor's: denied even under allowPrivate", () => {
+    home = makeHome(open);
+    const r = check(home, 'curl http://[fe80::1]/x');
+    expect(r.decision).toBe('deny');
+    expect(r.stdout).toMatch(/Protected Address/); // the floor's label, not egress's "unknown host"
+  });
+});

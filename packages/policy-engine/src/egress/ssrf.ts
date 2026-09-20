@@ -71,7 +71,7 @@ function parseIpv4(input: string): string | null {
 // ── IPv6 ────────────────────────────────────────────────────────────────────
 
 /** Expand to eight 16-bit groups, or null. Accepts a trailing dotted IPv4. */
-function expandIpv6(input: string): number[] | null {
+export function expandIpv6(input: string): number[] | null {
   const s = input.toLowerCase();
   if (!/^[0-9a-f:.]+$/.test(s)) return null;
   if ((s.match(/::/g) ?? []).length > 1) return null;
