@@ -1,5 +1,5 @@
 <h1 align="center">🛡️ node9</h1>
-<p align="center"><strong>Your AI agents can reach Slack, GitHub, email, and your database.<br />node9 decides what each one is allowed to do.</strong></p>
+<p align="center"><strong>Your AI agents can reach Slack, GitHub, email, and your database.<br />node9 decides what they may do with each one.</strong></p>
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/dm/node9-ai.svg" alt="monthly downloads" /></a>
