@@ -1,7 +1,7 @@
 {
   "name": "@node9/proxy",
   "version": "2.15.0",
-  "description": "The Sudo Command for AI Agents. Execution Security for Claude Code, Codex, Gemini, Cursor, Opencode, Pi, and any MCP server.",
+  "description": "IAM for your AI agents. Set what Claude Code, Codex, Gemini, Cursor and any MCP server are allowed to do, review risky actions before they run, and keep every action on the record.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -33,20 +33,27 @@
     "ai-security",
     "agent-security",
     "agentic-ai",
+    "ai-agent",
+    "iam",
+    "agent-permissions",
     "mcp",
+    "mcp-security",
     "mcp-proxy",
     "claude-code",
     "claude-desktop",
     "codex",
     "gemini-cli",
+    "copilot-cli",
     "cursor",
     "windsurf",
     "vscode",
     "opencode",
     "pi-agent",
     "hermes-agent",
-    "sudo",
+    "antigravity",
     "security-proxy",
+    "dlp",
+    "prompt-injection",
     "human-in-the-loop",
     "hitl"
   ],
@@ -134,7 +141,18 @@
       "main"
     ],
     "plugins": [
-      "@semantic-release/commit-analyzer",
+      [
+        "@semantic-release/commit-analyzer",
+        {
+          "releaseRules": [
+            {
+              "type": "docs",
+              "scope": "readme",
+              "release": "patch"
+            }
+          ]
+        }
+      ],
       "@semantic-release/release-notes-generator",
       "@semantic-release/npm",
       [
