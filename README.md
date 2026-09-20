@@ -1,4 +1,5 @@
 <h1 align="center">🛡️ node9</h1>
+<p align="center">IAM for your AI agents</p>
 <p align="center"><strong>Your AI agents can reach Slack, GitHub, email, and your database.<br />node9 decides what they may do with each one.</strong></p>
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
@@ -12,14 +13,19 @@
 
 ## The problem
 
-In August 2025, compromised releases of the `nx` build tool shipped a post-install script that
-looked for AI coding agents already installed on the developer's machine, then asked them to
-enumerate SSH keys, cloud credentials and wallet files and write the list to disk. The script
-pushed the results to public GitHub repositories. Thousands of secrets leaked, from machines
-where the agent was doing exactly what it was told.
+In August 2025, compromised releases of the
+[`nx` build tool](https://github.com/advisories/GHSA-cxm3-wv7p-598c) shipped a post-install
+script that looked for AI coding agents already installed on the developer's machine, then ran
+them with their own safety flags turned off (`--dangerously-skip-permissions`, `--yolo`,
+`--trust-all-tools`) to enumerate SSH keys, cloud credentials and wallet files and write the list
+to disk. The script pushed the results to public repositories inside the victims' own GitHub
+accounts. More than a thousand valid GitHub tokens leaked, along with cloud credentials, npm
+tokens and roughly 20,000 files, from machines where the agent was doing exactly what it was
+told.
 
 The agent was not the attacker. The agent was the tool, and nothing stood between it and the
-files.
+files. node9's gate is not one of those flags: it runs in the hook, and an action it holds stays
+held even when the agent was started with permissions skipped.
 
 ## What node9 does about it
 
@@ -226,27 +232,24 @@ Mission Control, so the dashboard stays empty.
 `node9 logout` disconnects a machine again. It revokes that machine's key;
 local enforcement keeps running.
 
-## Shields: curated rule packs
+## Shields and apps
 
-Each shield is a curated rule set for a service or domain. Enable only what you need.
+A **shield** is a curated rule pack for a service an agent touches: Postgres, MongoDB, Redis,
+AWS, Kubernetes, Docker, GitHub, the shell, the filesystem, and the credential jail. Three of
+them, `project-jail`, `bash-safe` and `filesystem`, are on after `node9 init`. The rest you
+enable per service. Each shield mixes hard blocks with actions that come to you for review, and
+the docs say which is which, rule by rule.
 
-| Shield            | What it catches                                                                | Enable                                |
-| ----------------- | ------------------------------------------------------------------------------ | ------------------------------------- |
-| `project-jail`    | Blocks reads of `~/.ssh`, `~/.aws`, `.env`, credentials via Bash and Read tool | `node9 shield enable project-jail`    |
-| `bash-safe`       | `curl \| bash`, `rm -rf /`, disk overwrite, `eval` of remote                   | `node9 shield enable bash-safe`       |
-| `postgres`        | `DROP TABLE`, `TRUNCATE`, `DROP COLUMN`, `DELETE` without `WHERE`              | `node9 shield enable postgres`        |
-| `mongodb`         | `dropDatabase`, `drop()`, `deleteMany({})`, index drops                        | `node9 shield enable mongodb`         |
-| `redis`           | `FLUSHALL`, `FLUSHDB`, `CONFIG SET` on a live server                           | `node9 shield enable redis`           |
-| `aws`             | S3 delete, EC2 terminate, IAM changes, RDS destroy                             | `node9 shield enable aws`             |
-| `k8s`             | namespace delete, `helm uninstall`, cluster role wipes                         | `node9 shield enable k8s`             |
-| `docker`          | `system prune`, `volume prune`, `rm -f` containers                             | `node9 shield enable docker`          |
-| `github`          | `gh repo delete`, remote branch deletion, settings changes                     | `node9 shield enable github`          |
-| `filesystem`      | `chmod 777`, writes under `/etc/`, `/boot/`, `/usr/`                           | `node9 shield enable filesystem`      |
-| `mcp-tool-gating` | unapproved MCP tools silently activating new capabilities                      | `node9 shield enable mcp-tool-gating` |
+Any **MCP app** your agents use, Gmail, Slack, your database, is governed tool by tool from the
+Apps page in the dashboard: which tools an agent may call, which need review, which are off.
 
 ```bash
-node9 shield list    # show all shields + status
+node9 shield list                 # every shield and its status
+node9 shield enable postgres      # or enable it fleet-wide from the dashboard
 ```
+
+The full list, with what each shield blocks and what it sends to review:
+**[node9.ai/docs/shields](https://node9.ai/docs/shields)**.
 
 ## Always on, no config needed
 
