@@ -11,9 +11,24 @@
 // The old guard checked scheme and userinfo only, so `https://evil.example/`
 // passed it, and it guarded 2 of the 12 places apiUrl becomes a destination.
 // Rather than patch twelve call sites — the "floor keyed on one seam" shape
-// this codebase keeps getting bitten by — this runs once in getCredentials,
-// where an untrusted file becomes program data. A consumer can no longer
-// receive a hostile apiUrl at all.
+// this codebase keeps getting bitten by — this runs where an untrusted file
+// becomes program data.
+//
+// The first version of this header said "once in getCredentials" and "a
+// consumer can no longer receive a hostile apiUrl at all". Both were wrong:
+// daemon/sync.ts had a second parser of the same file with no pin (found
+// 2026-09-19 by tracing each shipper back to its reader, not by reading this
+// comment). Where apiUrl is read and where it is pinned, today:
+//   - config/index.ts getCredentials       parses file + env; pins (safeApiUrl)
+//   - daemon/sync.ts readCredentials       delegates to getCredentials
+//   - cli.ts uninstall, logout.ts logout   parse the file themselves (they
+//                                          need the whole profile map) and
+//                                          hand apiUrl to revokeSelf, which pins
+//   - auth/cloud-endpoints.ts              pins NODE9_API_URL / --api-url for
+//                                          login and connect (validateApiUrl)
+// api-url-second-reader.spec.ts asserts that list is complete: any other file
+// that names the credentials file and touches apiUrl fails it by path.
+// Deliberately NOT a claim that nothing can go wrong; a claim of where to look.
 
 /** Where node9 ships to when nothing overrides it. */
 export const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept';

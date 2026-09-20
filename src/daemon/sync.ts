@@ -9,7 +9,7 @@ import fs from 'fs';
 import https from 'https';
 import os from 'os';
 import path from 'path';
-import { getConfig } from '../config/index.js';
+import { getConfig, getCredentials } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
 import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
@@ -30,7 +30,6 @@ import { tickScanWatcher, commitTotalsUpload, tickForensicBroadcast } from './sc
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
-import { DEFAULT_API_URL as BASE_API_URL } from '../auth/api-url';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -111,9 +110,6 @@ const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json
 // Last-known-good sibling — the reader falls back to it when the primary is
 // present but unparseable (external corruption). Kept in sync by writeCache.
 const rulesCacheBackupFile = () => path.join(os.homedir(), '.node9', 'rules-cache.last-good.json');
-// Derived, not restated: the host pin in auth/api-url validates against
-// DEFAULT_API_URL, so a second literal here could name a host its own pin rejects.
-const DEFAULT_API_URL = `${BASE_API_URL}/policies/sync`;
 const DEFAULT_INTERVAL_HOURS = 5;
 // Floor + ceiling for the resolved sync interval. The 15s floor keeps a
 // misconfigured/aggressive value from hammering the API (the ETag/304 path
@@ -228,44 +224,35 @@ interface CloudPolicyBody {
   }; // M2 settings
 }
 
+/**
+ * The machine's credentials, with apiUrl rewritten to the sync route.
+ *
+ * ONE reader. getCredentials (config/index.ts) parses the file and the env
+ * and pins apiUrl to the node9 API (auth/api-url). This function never sees
+ * the file. It used to: a second parser lived here, "same pattern as
+ * getCredentials()", and #335 pinned only the original, so policy sync, policy
+ * push, the audit shipper and posture all followed whatever host an agent
+ * wrote into credentials.json (measured 2026-09-19, and policy sync WRITES
+ * what that host returns into rules-cache.json). Do not add a parser here.
+ *
+ * Credentials store the intercept base (`…/api/v1/intercept`) so existing
+ * CLI calls keep working; sync lives at `…/intercept/policies/sync`, so the
+ * suffix is appended when the stored URL ends in `/intercept`. Anything else
+ * (a full sync URL, a self-hosted route under NODE9_API_HOST_ALLOW) is taken
+ * as-is.
+ */
 export function readCredentials(): { apiKey: string; apiUrl: string } | null {
-  // 1. Environment variable
-  if (process.env.NODE9_API_KEY) {
-    return {
-      apiKey: process.env.NODE9_API_KEY,
-      apiUrl: process.env.NODE9_API_URL ?? DEFAULT_API_URL,
-    };
-  }
-  // 2. ~/.node9/credentials.json (same pattern as getCredentials() in config/index.ts)
-  try {
-    const credPath = path.join(os.homedir(), '.node9', 'credentials.json');
-    const creds = JSON.parse(fs.readFileSync(credPath, 'utf-8')) as Record<string, unknown>;
-    const profileName = process.env.NODE9_PROFILE ?? 'default';
-    const profile = creds[profileName] as Record<string, unknown> | undefined;
-    if (typeof profile?.apiKey === 'string' && profile.apiKey.length > 0) {
-      return {
-        apiKey: profile.apiKey,
-        apiUrl:
-          typeof profile.apiUrl === 'string'
-            ? // Credentials store the firewall base URL (e.g.
-              // `https://api.node9.ai/api/v1/intercept`) so existing CLI
-              // calls keep working. Sync lives at `/intercept/policies/sync`
-              // — append the suffix when the stored URL ends in `/intercept`.
-              // Anything else is taken as-is so users can override the full
-              // URL via NODE9_API_URL or a non-standard apiUrl.
-              /\/intercept$/.test(profile.apiUrl)
-              ? profile.apiUrl + '/policies/sync'
-              : profile.apiUrl
-            : DEFAULT_API_URL,
-      };
-    }
-    if (typeof creds.apiKey === 'string' && creds.apiKey.length > 0) {
-      return { apiKey: creds.apiKey, apiUrl: DEFAULT_API_URL };
-    }
-  } catch {
-    /* fall through */
-  }
-  return null;
+  const creds = getCredentials();
+  if (!creds) return null;
+  // A trailing slash is the shape the CLI tolerates elsewhere (cloud-endpoints
+  // strips it too). Without this, `…/intercept/` skipped the rewrite, policy
+  // sync GET the bare base, and every push that keys on `/policies/sync`
+  // returned null with no log line.
+  const base = creds.apiUrl.replace(/\/+$/, '');
+  return {
+    apiKey: creds.apiKey,
+    apiUrl: /\/intercept$/.test(base) ? base + '/policies/sync' : base,
+  };
 }
 
 /**

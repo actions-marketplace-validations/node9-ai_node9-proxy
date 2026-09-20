@@ -62,35 +62,16 @@ const KNOWN_CHECKED_BY = new Set([
 ]);
 
 /**
- * Validates the audit URL before we send the bearer token to it.
+ * The apiUrl pin, re-exported so existing importers keep working.
  *
- * Threat model: `creds.apiUrl` originates from `$NODE9_API_URL` or
- * `~/.node9/credentials.json`. Both are local-user-controlled but a
- * supply-chain compromise, malicious installer, or env-var injection from a
- * parent process could redirect audit traffic — including the API key in the
- * Authorization header — to an attacker-controlled host. We require HTTPS,
- * with a narrow exception for loopback addresses used by tests/dev fixtures.
- *
- * Returns the parsed URL on success, or null when the URL is malformed,
- * uses a non-HTTPS scheme on a non-loopback host, or contains userinfo.
+ * This file used to define its own validateApiUrl: scheme and userinfo only,
+ * any https host accepted. It predated the host pin in auth/api-url (#335),
+ * shared its name, and the audit shipper imported it, so the shipper had a
+ * guard that let `https://evil.example.com` through. One function, one
+ * strength: the real pin lives in auth/api-url and nowhere else.
  */
-export function validateApiUrl(raw: string): URL | null {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  // Reject userinfo (`https://attacker@real.host`) — the Bearer token is
-  // already in the Authorization header; userinfo here is always a smell.
-  if (u.username || u.password) return null;
-  if (u.protocol === 'https:') return u;
-  if (u.protocol === 'http:') {
-    const h = u.hostname;
-    if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]') return u;
-  }
-  return null;
-}
+import { validateApiUrl } from './api-url';
+export { validateApiUrl };
 
 /**
  * Send an audit record to the SaaS backend for a locally fast-pathed call.
