@@ -344,10 +344,7 @@ program
       ];
       if (prof?.apiKey) {
         console.log(chalk.bold('Disconnecting from the cloud...'));
-        const r = await revokeSelf({
-          apiKey: prof.apiKey,
-          apiUrl: prof.apiUrl || 'https://api.node9.ai/api/v1/intercept',
-        });
+        const r = await revokeSelf({ apiKey: prof.apiKey, apiUrl: prof.apiUrl });
         if (r.outcome === 'revoked') {
           console.log(chalk.green('  ✅ Machine disconnected — its key is revoked'));
         } else if (r.outcome === 'already') {

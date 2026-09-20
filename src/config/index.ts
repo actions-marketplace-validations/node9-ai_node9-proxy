@@ -641,16 +641,19 @@ export function getCredentials(): {
       const profileName = process.env.NODE9_PROFILE || 'default';
       const profile = creds[profileName] as Record<string, unknown> | undefined;
 
-      if (profile?.apiKey) {
+      // A key is a non-empty string. A truthy non-string (`{"apiKey": 123}`
+      // from a hand-edited file) used to pass and go on the wire as
+      // `Bearer 123`; the daemon's own reader refused it, and now this one does.
+      if (typeof profile?.apiKey === 'string' && profile.apiKey.length > 0) {
         return {
-          apiKey: profile.apiKey as string,
+          apiKey: profile.apiKey,
           apiUrl: safeApiUrl(profile.apiUrl || DEFAULT_API_URL, noteRejectedApiUrl),
           localOnly: profile.localOnly === true || profileName !== 'default',
         };
       }
-      if (creds.apiKey) {
+      if (typeof creds.apiKey === 'string' && creds.apiKey.length > 0) {
         return {
-          apiKey: creds.apiKey as string,
+          apiKey: creds.apiKey,
           apiUrl: safeApiUrl(creds.apiUrl || DEFAULT_API_URL, noteRejectedApiUrl),
           localOnly: creds.localOnly === true,
         };
