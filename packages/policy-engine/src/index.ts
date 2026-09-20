@@ -58,7 +58,7 @@ export {
 } from './shell';
 
 // Egress / destination policy (GAP-5).
-export type { EgressPolicy, EgressVerdict } from './egress';
+export type { EgressPolicy, EgressVerdict, Destination } from './egress';
 export { evaluateEgress, isPrivateHost, hostMatches, DEFAULT_EGRESS_ALLOWLIST } from './egress';
 
 // Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.
@@ -191,7 +191,11 @@ export {
   ssrfReason,
   SSRF_MAX_HOST,
 } from './egress/ssrf';
-export { ssrfDestinationFloor, DESTINATION_ARGS } from './egress/destinations';
+export {
+  ssrfDestinationFloor,
+  extractToolDestinations,
+  DESTINATION_ARGS,
+} from './egress/destinations';
 export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egress/ssrf';
 export { extractShellDestTokens } from './shell/index';
 export type { ShellDestToken } from './shell/index';

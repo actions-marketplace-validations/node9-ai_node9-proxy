@@ -9,6 +9,16 @@
 import type { ShellDestination } from '../shell';
 import { classifySsrf, normalizeIpLiteral, expandIpv6 } from './ssrf';
 
+/**
+ * A destination a tool call will reach, whichever carrier declared it: a
+ * shell command (extractShellDestinations) or a tool argument
+ * (extractToolDestinations). The interface is still spelled ShellDestination
+ * where it lives (shell/index.ts, which is hashed by the extractor-version
+ * gate, so a rename there is not free); this is the name that says what the
+ * shape is for.
+ */
+export type Destination = ShellDestination;
+
 export interface EgressPolicy {
   /** Master switch. Default false — opt-in, like dlp.pii. */
   enabled: boolean;
@@ -66,19 +76,31 @@ export const DEFAULT_EGRESS_ALLOWLIST: readonly string[] = [
 
 /** Glob host match: "*" = any, "*.x" = apex x + any subdomain, else exact. */
 export function hostMatches(host: string, pattern: string): boolean {
-  const h = host.toLowerCase();
-  const p = pattern.toLowerCase().trim();
+  const p = pattern.trim().toLowerCase();
   if (!p) return false;
   if (p === '*') return true;
+  // BOTH sides fold. Canonicalizing only the host silently killed every list
+  // entry stored in a non-canonical spelling: a `deny` written as `[::1]`
+  // (the spelling the shell extractor hands over, so the obvious one to
+  // copy) stopped matching and failed OPEN, and an `allow` written the same
+  // way failed CLOSED. Entries arrive unnormalized from `node9 egress deny`,
+  // a config.json edit and the managed list, so the fold belongs here, at
+  // the one place both sides meet.
+  const h = canonicalHost(host);
   if (p.startsWith('*.')) {
-    const suffix = p.slice(2);
+    const suffix = canonicalHost(p.slice(2));
     return h === suffix || h.endsWith('.' + suffix);
   }
-  return h === p;
+  return h === canonicalHost(p);
 }
 
-function matchesAny(host: string, patterns: readonly string[]): boolean {
-  for (const p of patterns) if (hostMatches(host, p)) return true;
+function matchesAny(host: string, patterns: readonly string[] | undefined): boolean {
+  // `?? []`: EgressPolicy.allow/deny are typed required, but PolicyConfig.egress
+  // is optional for engine consumers that build a config by hand, and the new
+  // tool branch reaches this before the ignored fast path. A partial
+  // `{ enabled: true, mode: 'block' }` threw "patterns is not iterable" where
+  // the parent returned allow.
+  for (const p of patterns ?? []) if (hostMatches(host, p)) return true;
   return false;
 }
 
@@ -119,7 +141,10 @@ function isUniqueLocalV6(host: string): boolean {
  * gave it its own tier; a Tailscale user lists the range in `allow`.
  */
 export function isPrivateHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
+  // The trailing dot is stripped HERE rather than by the caller: this function
+  // is exported and called on raw hosts elsewhere, and folding it upstream
+  // only made the two callers disagree about `localhost.`.
+  const h = host.trim().toLowerCase().replace(/\.$/, '');
   // The floor's answer first. `metadata.google.internal` ends in `.internal`
   // and the old body called it private on the suffix alone; the floor blocks
   // it before this function is asked, but this function should not disagree.
@@ -132,6 +157,29 @@ export function isPrivateHost(host: string): boolean {
 }
 
 /**
+ * One spelling per address, for both a destination and a list entry.
+ *
+ * The two extractors spell one address two ways (measured 2026-09-20: the
+ * shell extractor hands `[::1]` over with its brackets, hostOf strips them),
+ * so without this an allow or deny entry matched one carrier and missed the
+ * other on the same address. IP literals fold through normalizeIpLiteral
+ * (brackets, zone id, IPv4-mapped IPv6 to the IPv4 it denotes); hostnames
+ * lowercase and drop a trailing dot; a glob is left to hostMatches, which
+ * folds the suffix only.
+ *
+ * Exported so the WRITE side (`normalizeEgressHost`, what `node9 egress
+ * allow/deny` stores) folds the same way the READ side compares. A stored
+ * entry and the key it is matched against must not be two functions.
+ *
+ * The egress verdict still reports the host AS WRITTEN, so the reason matches
+ * what the user typed.
+ */
+export function canonicalHost(host: string): string {
+  const ip = normalizeIpLiteral(host);
+  return ip ?? host.trim().toLowerCase().replace(/\.$/, '');
+}
+
+/**
  * Evaluate extracted destinations against the egress policy. Precedence per
  * host: deny (block) > private-allow > allow/default-allow (skip) > unknown
  * (policy.mode). Returns the most severe actionable verdict across all
@@ -140,13 +188,15 @@ export function isPrivateHost(host: string): boolean {
  * Pure.
  */
 export function evaluateEgress(
-  dests: readonly ShellDestination[],
+  dests: readonly Destination[],
   policy: EgressPolicy
 ): EgressVerdict | null {
   if (!policy.enabled) return null;
   let review: EgressVerdict | null = null;
 
   for (const d of dests) {
+    // The host is passed AS WRITTEN: hostMatches and isPrivateHost each fold
+    // their own inputs, so there is no half-folded value in flight here.
     // Explicit deny always wins.
     if (matchesAny(d.host, policy.deny)) {
       return {

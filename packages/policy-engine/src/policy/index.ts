@@ -8,7 +8,7 @@
 import type { SmartRule } from '../types';
 import { extractShellDestTokens } from '../shell/index';
 import { ssrfFloor } from '../egress/ssrf';
-import { ssrfDestinationFloor } from '../egress/destinations';
+import { ssrfDestinationFloor, extractToolDestinations } from '../egress/destinations';
 import { scanArgs } from '../dlp';
 import {
   detectDangerousShellExec,
@@ -27,7 +27,7 @@ import {
 import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
-import { evaluateEgress, type EgressPolicy } from '../egress';
+import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -321,6 +321,27 @@ function pipeChainVerdict(
  * provenance verdict, sandbox allow, dangerous-word review, or strict-mode
  * fallback. See the design doc for the full tier table.
  */
+/**
+ * ONE egress verdict shape, for both carriers. The shell branch and the
+ * tool branch built this separately for one commit and already disagreed on
+ * how to spell ruleName; `eg.binary` IS the tool name for a tool carrier and
+ * the binary for a shell one, so it is the single right subject for both.
+ *
+ * `overridable` is deliberately unset: the egress POLICY is overridable (an
+ * allowlist entry lifts it). Only the SSRF floor carries overridable: false.
+ */
+function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
+  return {
+    decision: eg.verdict,
+    blockedByLabel:
+      eg.verdict === 'block' ? '🌐 Node9 Egress (Blocked)' : '🌐 Node9 Egress (Review)',
+    reason: eg.reason,
+    ruleName: `egress:${eg.binary}:${eg.host}`,
+    ruleDescription: eg.reason,
+    tier: eg.verdict === 'block' ? 3 : 4,
+  };
+}
+
 export async function evaluatePolicy(
   config: PolicyConfig,
   toolName: string,
@@ -389,10 +410,40 @@ export async function evaluatePolicy(
     }
   }
 
+  // ── Egress policy, non-shell destinations (G10) ──────────────────────────
+  // The shell branch applies evaluateEgress to curl/wget/…; a tool that
+  // fetches a URL itself never has a shellCommand, so that branch cannot see
+  // it (measured 2026-09-20: curl to an unknown host denied, the same URL
+  // through WebFetch / MCP fetch / navigate allowed). Same closed list as the
+  // floor above, same evaluator as the shell branch, one verdict builder.
+  //
+  // COMPUTED here, RETURNED later. The fast path below returns for an ignored
+  // tool (WebFetch is on ignoredTools), so the verdict has to exist before
+  // it; but returning it here put it ahead of smart rules, while the shell
+  // branch sits AFTER them, and a user `block` rule on a tool carrier was
+  // downgraded to this review (measured). So it is held and returned at the
+  // two points that mirror the shell law: at the fast path for an ignored
+  // tool, and after the smart-rule section for everything else.
+  //
+  // The floor already ran, so a tier-1 address is a non-overridable block and
+  // never reaches this policy.
+  const pendingToolEgress: PolicyVerdict | undefined = config.policy.egress?.enabled
+    ? (() => {
+        const dests = extractToolDestinations(toolName, args);
+        const eg = dests.length > 0 ? evaluateEgress(dests, config.policy.egress) : null;
+        return eg ? egressPolicyVerdict(eg) : undefined;
+      })()
+    : undefined;
+
   // 1. Ignored tools (Fast Path) - Always allow these first
   // Task #20: the jail guard sets skipIgnoredFastPath after finding a jailed
   // path in a file-tool call — the shield's rules must get to speak.
-  if (wouldBeIgnored && !context.skipIgnoredFastPath) return { decision: 'allow' };
+  // G10: an ignored tool that declared a destination the egress policy
+  // actions gets that verdict instead of the silent allow. Smart rules never
+  // ran for an ignored tool before this change and still do not.
+  if (wouldBeIgnored && !context.skipIgnoredFastPath) {
+    return pendingToolEgress ?? { decision: 'allow' };
+  }
 
   // ONE definition of "this tool carries a shell command": a BASH_TOOL_NAMES
   // spelling, or a toolInspection 'command' field (terminal.execute). Every
@@ -580,6 +631,12 @@ export async function evaluatePolicy(
   let pathTokens: string[] = [];
 
   // 3. Tokenize the input
+  // G10: the held tool-egress verdict, now that the smart-rule section has
+  // had its say (a matching `allow` rule returned above and lifted it, which
+  // is exactly what happens on the shell path). Before the shell branch and
+  // before dangerous words, mirroring where the shell branch sits.
+  if (pendingToolEgress) return pendingToolEgress;
+
   const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
   if (shellCommand) {
     const analyzed: ShellCommandAnalysis = analyzeShellCommand(shellCommand);
@@ -701,17 +758,7 @@ export async function evaluatePolicy(
       const dests = extractShellDestinations(shellCommand);
       if (dests.length > 0) {
         const eg = evaluateEgress(dests, config.policy.egress);
-        if (eg) {
-          return {
-            decision: eg.verdict,
-            blockedByLabel:
-              eg.verdict === 'block' ? '🌐 Node9 Egress (Blocked)' : '🌐 Node9 Egress (Review)',
-            reason: eg.reason,
-            ruleName: `egress:${eg.binary}:${eg.host}`,
-            ruleDescription: eg.reason,
-            tier: eg.verdict === 'block' ? 3 : 4,
-          };
-        }
+        if (eg) return egressPolicyVerdict(eg);
       }
     }
 
