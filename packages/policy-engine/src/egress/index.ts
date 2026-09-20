@@ -7,6 +7,7 @@
 // out of scope; we only know what the config tells us.
 
 import type { ShellDestination } from '../shell';
+import { classifySsrf, normalizeIpLiteral, expandIpv6 } from './ssrf';
 
 export interface EgressPolicy {
   /** Master switch. Default false — opt-in, like dlp.pii. */
@@ -81,16 +82,53 @@ function matchesAny(host: string, patterns: readonly string[]): boolean {
   return false;
 }
 
-/** localhost / loopback / RFC1918 / link-local-ish — never a real exfil target. */
+/** Suffixes that name a private host by convention, not by address. */
+const PRIVATE_HOST_SUFFIXES = ['.local', '.internal', '.localhost'] as const;
+
+/**
+ * Unique-local IPv6, fc00::/7. Lives here and not in ssrf.ts on purpose: the
+ * floor decided ULA is not a tier (floor design H9, it is the RFC1918
+ * analogue and RFC1918 is out of the floor), and that decision stands. For
+ * allowPrivate the same analogy points the other way: RFC1918 IS private
+ * here, so ULA is too.
+ */
+function isUniqueLocalV6(host: string): boolean {
+  const ip = normalizeIpLiteral(host);
+  if (!ip || !ip.includes(':')) return false;
+  const g = expandIpv6(ip);
+  return g !== null && (g[0] & 0xfe00) === 0xfc00;
+}
+
+/**
+ * "Private" for the allowPrivate opt-in: loopback, RFC1918 and its IPv6
+ * analogue, the unspecified address, and the conventional local suffixes.
+ *
+ * The address half is classifySsrf's answer, so every spelling that file
+ * normalizes (brackets, zone id, IPv4-mapped IPv6) is one spelling here too.
+ * The old body had its own IPv4-only regexes and returned false for `[::1]`,
+ * which BLOCKED a local IPv6 dev server under allowPrivate (measured
+ * 2026-09-20; the shell extractor keeps the brackets, the declared-URL
+ * extractor strips them, and this function knew neither). Two parsers for
+ * one question is how that happens.
+ *
+ * NOT private here: link-local, multicast, the metadata endpoints. Those are
+ * the SSRF floor's tiers and allowPrivate must not be able to reach them;
+ * evaluateEgress documents that the floor runs first, and this function
+ * agrees with it rather than relying on it. CGNAT (100.64/10) is also out:
+ * a mesh-VPN peer is not everyone's private network, which is why the floor
+ * gave it its own tier; a Tailscale user lists the range in `allow`.
+ */
 export function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '0.0.0.0') return true;
-  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;
-  if (/^127\./.test(h)) return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  return false;
+  const h = host.trim().toLowerCase();
+  // The floor's answer first. `metadata.google.internal` ends in `.internal`
+  // and the old body called it private on the suffix alone; the floor blocks
+  // it before this function is asked, but this function should not disagree.
+  const m = classifySsrf(h);
+  if (m) return m.kind === 'address' && (m.tier === 'private' || m.tier === 'unspecified');
+
+  if (h === 'localhost') return true;
+  if (PRIVATE_HOST_SUFFIXES.some((s) => h.endsWith(s))) return true;
+  return isUniqueLocalV6(h);
 }
 
 /**
