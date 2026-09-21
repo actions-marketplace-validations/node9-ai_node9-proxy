@@ -26,12 +26,20 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { FS_READ_TOOLS, analyzeFsOperation } from '@node9/policy-engine';
+import {
+  FS_READ_TOOLS,
+  COMMAND_WRAPPERS,
+  COPY_VERBS as ENGINE_COPY_VERBS,
+  PATTERN_VERB_NAMES,
+  sampleCopyCommand,
+  analyzeFsOperation,
+} from '@node9/policy-engine';
 import {
   CLI,
   makeHome,
   runCli,
   probe,
+  seedBuiltinJailHome,
   explain,
   cleanup,
   writeConfig,
@@ -210,6 +218,62 @@ describe('jail gauntlet — the verb axis, derived from FS_READ_TOOLS', () => {
   }
 });
 
+/**
+ * ⭐ STAGE 5a: THE PATTERN-VERB AXIS, against the BUILT-IN baseline.
+ *
+ * The reader axis above runs against a USER jail (`jail add`), whose rule is a
+ * verb-agnostic regex over the raw command. That rule fires whatever the slot,
+ * so it CANNOT witness stage 5a: a pattern verb passes it either way. This block
+ * uses `~/.ssh/id_rsa` with nothing configured, so only the built-in AST tier
+ * can answer, and asserts BOTH directions per verb:
+ *
+ *   VERB foo <jailed file>   must BLOCK   the file slot, a real read
+ *   VERB <jailed string> f   must RUN     the pattern slot, a search
+ *
+ * DERIVED from the engine's own `PATTERN_VERB_NAMES`, so a verb added to the
+ * table is exercised end to end without anyone remembering this file. The second
+ * direction is the one that pays for the comparison page: `grep -n '.env'
+ * .gitignore` is the single most common `.env` command in a repo.
+ *
+ * ⚠️ WINDOWS skipped for the reason pinned at the engine-level block below:
+ * mvdan eats `\` as a POSIX escape, so the built-in jail never fires there.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 5a: the pattern-verb axis, derived from PATTERN_VERB_NAMES',
+  () => {
+    for (const verb of [...PATTERN_VERB_NAMES].sort()) {
+      it(`\`${verb}\` reading a jailed FILE is blocked`, () => {
+        const { home } = jailedHome();
+        const ssh = path.join(home, '.ssh');
+        fs.mkdirSync(ssh, { recursive: true });
+        const r = probe(home, 'Bash', {
+          command: `${verb} needle ${path.join(ssh, 'id_rsa')}`,
+        });
+        expect(r.verdict, `${verb} on a jailed file is a read`).toBe('block');
+      });
+
+      it(`\`${verb}\` SEARCHING FOR the jail name still runs`, () => {
+        const { home } = jailedHome();
+        fs.writeFileSync(path.join(home, 'notes.txt'), 'x\n');
+        const r = probe(home, 'Bash', {
+          command: `${verb} .env ${path.join(home, 'notes.txt')}`,
+        });
+        expect(r.verdict, `${verb} searching for the STRING reads no credential`).toBe('allow');
+      });
+    }
+
+    it('CONTROL: the same string one slot over still blocks', () => {
+      const { home } = jailedHome();
+      const ssh = path.join(home, '.ssh');
+      fs.mkdirSync(ssh, { recursive: true });
+      const r = probe(home, 'Bash', { command: `grep -rn ${path.join(ssh, 'config')} docs/` });
+      expect(r.verdict, 'the pattern slot is excused by SLOT, not by shape').toBe('allow');
+      const r2 = probe(home, 'Bash', { command: `grep -rn foo ${path.join(ssh, 'config')}` });
+      expect(r2.verdict, 'and the file slot is not').toBe('block');
+    });
+  }
+);
+
 /** Build a command that MOVES rather than prints, per verb. */
 function copyCmd(verb: string, src: string): string {
   if (verb === 'tar') return `tar cf /tmp/n9-gauntlet.tar ${src}`;
@@ -246,50 +310,37 @@ describe('jail gauntlet — copy verbs ARE covered by a user/org jail', () => {
 });
 
 /**
- * KNOWN UNCOVERED — the real, narrowed `BUGS.md` § A.
+ * BUGS.md § A — CLOSED 2026-09-12 by stage 4 (argument position + copy verbs).
  *
- * The baseline paths (`~/.ssh`, `~/.aws`, `.env`) are guarded by the AST tier,
- * which asks "which command PRINTS a file". `cp`/`tar`/`rsync` don't print,
- * they move — and once the secret sits at /tmp every rule is gone, because they
- * all key on the original path.
+ * This block was INVERTED for twelve days: it asserted that `cp`/`tar`/`rsync`
+ * still escaped the built-in jail, so the gap was a fact CI read every run
+ * instead of a line in a doc. Its own instruction was "when you fix one this
+ * test fails -- that is success; move the verb into the covered block". All
+ * five moved at once, so the block became this: the same loop over the file's
+ * own five-verb list, now asserting the covered verdict. The FULL engine table
+ * is exercised by the derived stage-4 block below.
  *
- * ⚠️ These assertions are deliberately INVERTED: they assert the gap still
- * exists. Until now it lived only in a doc — nothing told a reader it was
- * there, nothing failed if someone half-fixed it, nothing would catch a later
- * regression. As a test it is a fact CI reads every run.
+ * The verdict is REVIEW, not block, by decision: `tar czf ssh-backup.tgz
+ * ~/.ssh` and `tar czf /tmp/s.tgz ~/.ssh` are the same verb, slot and path,
+ * and a hard block would break every backup script. Headless Claude Code
+ * denies an ask (measured), so CI is still stopped.
  *
- * ✅ WHEN YOU FIX ONE this test FAILS. That is success — move the verb up into
- * the covered block and delete its line here. Never silence it by loosening
- * the assertion.
- *
- * ⚠️ WINDOWS — skipped, because the premise itself is absent there.
- * `path.join` yields backslashes on win32, and mvdan-sh parses `\` as a POSIX
- * escape and EATS it, so the literal reaching the matcher has no separators
- * left at all:
- *
- *   POSIX    paths ["/home/x/.ssh/id_rsa"]   6 tokens  → block
- *   win32    paths ["C:Usersx.sshid_rsa"]    2 tokens  → NULL
- *
- * So on Windows the built-in baseline never fires for ANY verb, and both the
- * "copy escapes" rows and their CONTROL become vacuous — the rows would pass
- * for the wrong reason and the CONTROL fails outright. That is a real product
- * gap, not a test bug; it is pinned platform-independently by the engine-level
- * block below so skipping here hides nothing.
- *
- * `pathRules` (user + fleet jail) is unaffected — it is a regex over raw
- * command text with `[\s/\\]` separators and never meets the parser. The
- * derived read-verb suite above therefore still runs everywhere.
+ * ⚠️ WINDOWS — skipped for the reason documented at the engine-level block
+ * below: mvdan eats `\` as a POSIX escape, so the built-in jail never fires
+ * for ANY verb there. Skipping hides nothing; the gap is pinned there.
  */
 describe.skipIf(process.platform === 'win32')(
-  'jail gauntlet — copy verbs escape the BUILT-IN baseline (BUGS.md § A)',
+  'jail gauntlet — copy verbs are REVIEWED by the BUILT-IN baseline (BUGS.md § A, closed)',
   () => {
     for (const verb of COPY_VERBS) {
-      it(`⚠️ \`${verb}\` on ~/.ssh still escapes — read the block comment before fixing`, () => {
+      it(`\`${verb}\` on ~/.ssh is a review`, () => {
         const { home } = jailedHome();
         const ssh = path.join(home, '.ssh');
         fs.mkdirSync(ssh, { recursive: true });
         const r = probe(home, 'Bash', { command: copyCmd(verb, path.join(ssh, 'id_rsa')) });
-        expect(r.verdict, `${verb} moves the baseline secret out unnoticed`).toBe('allow');
+        expect(r.verdict, `${verb} moves the baseline secret out -- must be reviewed`).toBe(
+          'review'
+        );
       });
     }
 
@@ -355,3 +406,149 @@ describe('AST tier — Windows path blindness (known gap)', () => {
     expect(analyzeFsOperation('cat /home/x/.ssh/id_rsa')?.verdict).toBe('block');
   });
 });
+
+/**
+ * Stage 2 — REACHABILITY, at the real gate, against the BUILT-IN jail.
+ *
+ * The blocks above probe a `jail add` path, which the user jail guards with a
+ * verb-agnostic regex over the raw command text. That regex already catches
+ * `env cat <jailed>`, so it cannot witness this bug. The built-in jail
+ * (`~/.ssh`, `~/.aws`, `.env`) is the AST tier, and the AST tier consulted its
+ * matcher only for a reader at argv[0] with the path in argv. Measured
+ * 2026-09-11, controls held: `env cat ~/.ssh/id_rsa` ALLOW, `cat < ~/.ssh/id_rsa`
+ * ALLOW, `eval "cat ~/.ssh/id_rsa"` ALLOW.
+ *
+ * Wrapper rows are DERIVED from `COMMAND_WRAPPERS`, the set the engine's chmod
+ * detector already unwraps with -- add a wrapper there and it gains a row here,
+ * the same rule the verb-axis block follows for `FS_READ_TOOLS`.
+ * Design: doc/jail-stage2-reachability-design.md.
+ */
+function builtinJailHome(): { home: string; key: string; plain: string } {
+  const seeded = seedBuiltinJailHome('node9-jail-reach-');
+  homes.push(seeded.home);
+  return seeded;
+}
+
+// skipIf(win32) for the same documented reason as the built-in-jail block
+// above: mvdan eats `\` as a POSIX escape, so the AST tier returns null for
+// every Windows-shaped path. Without this the Windows matrix spawns 40+ child
+// processes to watch them fail.
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 2: the wrapper axis, derived from COMMAND_WRAPPERS',
+  () => {
+    it('controls: the built-in jail blocks a plain read and allows a plain file', () => {
+      const { home, key, plain } = builtinJailHome();
+      expect(probe(home, 'Bash', { command: `cat ${key}` }).verdict).toBe('block');
+      expect(probe(home, 'Bash', { command: `cat ${plain}` }).verdict).toBe('allow');
+    });
+    for (const wrapper of [...COMMAND_WRAPPERS].sort()) {
+      it(`shell: \`${wrapper} cat <key>\` is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        const r = probe(home, 'Bash', { command: `${wrapper} cat ${key}` });
+        expect(r.error, 'spawn must not fail silently').toBeUndefined();
+        expect(r.status, `${wrapper} runs cat — the read must reach the jail`).toBe(2);
+        expect(r.verdict).toBe('block');
+      });
+      // The plain-file half is pinned per-wrapper at the engine
+      // (jail-reachability.spec.ts STAYS_QUIET); here it rides on the key row's
+      // own home so the axis costs one spawn per wrapper, not two.
+    }
+  }
+);
+
+// A deliberate SUBSET of packages/policy-engine/src/policy/jail-reachability.spec.ts:
+// that file is the full matrix at the engine; this block proves the shapes
+// survive the real gate (taint tier, DLP, approvers). Not derived on purpose.
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 2: the redirect and string axes',
+  () => {
+    const REDIRECT_SHAPES: Array<[string, (k: string) => string]> = [
+      ['cat <', (k) => `cat < ${k}`],
+      ['read builtin', (k) => `read -r L < ${k}; echo $L`],
+      ['mapfile builtin', (k) => `mapfile -t A < ${k}`],
+      ['exec redirect', (k) => `exec < ${k}; cat`],
+      ['$(< file)', (k) => `Y=$(<${k}); echo $Y`],
+      ['while loop', (k) => `while read l; do echo $l; done < ${k}`],
+      ['tee', (k) => `tee /tmp/n9-reach < ${k}`],
+    ];
+    for (const [label, mk] of REDIRECT_SHAPES) {
+      it(`shell: ${label} on the key is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        expect(probe(home, 'Bash', { command: mk(key) }).verdict).toBe('block');
+      });
+    }
+    // ⛔ `nc h 80 < key` is NOT here: `nc` is a network command, so the taint
+    // tier runs first, cannot reach the daemon, and its review pre-empts the
+    // jail's block. BUGS.md JAIL-7, pinned failing in taint-preempt.
+    it('shell: a redirect from a plain file stays allowed', () => {
+      const { home, plain } = builtinJailHome();
+      expect(probe(home, 'Bash', { command: `sort < ${plain}` }).verdict).toBe('allow');
+    });
+
+    const STRING_SHAPES: Array<[string, (k: string) => string]> = [
+      ['sh -c', (k) => `sh -c "cat ${k}"`],
+      ['bash -c', (k) => `bash -c "cat ${k}"`],
+      ['eval quoted', (k) => `eval "cat ${k}"`],
+      ['eval bare', (k) => `eval cat ${k}`],
+    ];
+    for (const [label, mk] of STRING_SHAPES) {
+      it(`shell: ${label} with a literal payload is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        expect(probe(home, 'Bash', { command: mk(key) }).verdict).toBe('block');
+      });
+    }
+    it('shell: find -exec <reader> on the directory is blocked', () => {
+      const { home } = builtinJailHome();
+      const r = probe(home, 'Bash', { command: `find ${path.join(home, '.ssh')} -exec cat {} +` });
+      expect(r.verdict).toBe('block');
+    });
+  }
+);
+
+/**
+ * Stage 4 — COPY VERBS against the BUILT-IN jail, at the real gate. The block
+ * above ("copy verbs ARE covered by a user/org jail") proves `jail add` catches
+ * them by regex; this one proves the built-in jail now does too, by SLOT, and
+ * that the three false positives every reverted fix shipped stay open. A copy
+ * is a REVIEW (design section 6: backup and theft are one shape), which the
+ * gate reports as `ask` -> 'review'.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 4: copies out of the built-in jail',
+  () => {
+    it('controls: read blocks, plain file allows', () => {
+      const { home, key, plain } = builtinJailHome();
+      expect(probe(home, 'Bash', { command: `cat ${key}` }).verdict).toBe('block');
+      expect(probe(home, 'Bash', { command: `cp ${plain} /tmp/n9-plain` }).verdict).toBe('allow');
+    });
+    // DERIVED from the engine's COPY_VERBS: every verb and shape the engine
+    // knows is exercised at the real gate, so a verb added there gains a row
+    // here (the rule the reader and wrapper axes already follow).
+    for (const verb of Object.keys(ENGINE_COPY_VERBS).sort()) {
+      it(`shell: \`${verb}\` copying the key is a review`, () => {
+        const { home, key } = builtinJailHome();
+        const r = probe(home, 'Bash', { command: sampleCopyCommand(verb, key) });
+        expect(r.error, 'spawn must not fail silently').toBeUndefined();
+        expect(r.status, 'a review rides on exit 0').toBe(0);
+        expect(r.verdict, r.stdout).toBe('review');
+      });
+    }
+    it('shell: `sudo cp` of the key is a review (wrapped)', () => {
+      const { home, key } = builtinJailHome();
+      const r = probe(home, 'Bash', { command: `sudo cp ${key} /tmp/n9-k` });
+      expect(r.error, 'spawn must not fail silently').toBeUndefined();
+      expect(r.verdict, r.stdout).toBe('review');
+    });
+    for (const [label, mk] of [
+      ['key install (dest slot)', (k: string) => `cp /tmp/ci_key ${k}`],
+      ['key use (ssh -i)', (k: string) => `ssh -i ${k} host.invalid`],
+      ['key use (scp -i)', (k: string) => `scp -i ${k} dist.tgz host.invalid:/srv/`],
+      ['scaffolding', () => `cp .env.example .env`],
+    ] as Array<[string, (k: string) => string]>) {
+      it(`shell: ${label} stays allowed`, () => {
+        const { home, key } = builtinJailHome();
+        expect(probe(home, 'Bash', { command: mk(key) }).verdict).toBe('allow');
+      });
+    }
+  }
+);

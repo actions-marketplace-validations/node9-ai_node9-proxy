@@ -99,8 +99,7 @@ function triggerKeys(wf: Workflow, raw: Record<string, unknown>): string[] {
 
 function onObject(wf: Workflow, raw: Record<string, unknown>): Record<string, unknown> | undefined {
   return (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
 }
 function activityTypes(node: unknown): string[] {
   return node && Array.isArray((node as { types?: unknown }).types)
@@ -348,8 +347,7 @@ const NEGATED_CONTAINS_RE =
  *  `pull_request: types:[labeled]` job on the label name). */
 function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolean {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   const prTypes = (t: unknown): string[] =>
     t && Array.isArray((t as { types?: unknown }).types)
       ? (t as { types: unknown[] }).types.map(String)
@@ -777,6 +775,8 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 
   return {
     check: 'CI-2',
+    // One verdict per workflow file — the finding IS the file's reachability score.
+    rule: 'CI-2.injectable-workflow',
     dimension: 'workflows',
     severity,
     title,
@@ -958,6 +958,7 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
 
   return {
     check: 'CI-4',
+    rule: 'CI-4.agent-reachable-secret',
     dimension: 'data',
     severity: worst.severity,
     title:

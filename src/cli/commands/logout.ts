@@ -4,6 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import chalk from 'chalk';
 import { postJson } from '../../utils/post-json';
+import { safeMessage } from '../../utils/safe-text';
+import { safeApiUrl, HOST_ALLOW_ENV } from '../../auth/api-url';
 
 // node9 logout (login-v2 §5, phase C.2) — the machine end of Disconnect.
 // Revokes this machine's key in the cloud (best-effort) and removes it
@@ -21,7 +23,8 @@ import { postJson } from '../../utils/post-json';
  */
 export async function revokeSelf(creds: {
   apiKey: string;
-  apiUrl: string;
+  /** As read off disk. Absent or rejected values fall back to the default host. */
+  apiUrl?: string;
 }): Promise<
   | { outcome: 'revoked'; name?: string }
   | { outcome: 'already' }
@@ -29,13 +32,33 @@ export async function revokeSelf(creds: {
 > {
   // credentials.json stores the intercept BASE (…/api/v1/intercept); the
   // self-disconnect endpoint is its child.
-  const url = creds.apiUrl.replace(/\/$/, '') + '/machines/self/disconnect';
+  //
+  // Both callers (`logout`, `uninstall`) read apiUrl straight off disk, so the
+  // pin is applied here, once: the key must not follow a rewritten file to a
+  // remote host on its way out either.
+  let rejected: string | null = null;
+  const base = safeApiUrl(creds.apiUrl, (raw) => {
+    rejected = String(raw).slice(0, 200);
+  }).replace(/\/$/, '');
+  const url = base + '/machines/self/disconnect';
   try {
     const r = await postJson<{ ok: boolean; name?: string }>(url, {}, creds.apiKey);
     return { outcome: 'revoked', name: r.name };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (/HTTP 401/.test(msg)) return { outcome: 'already' };
+    if (/HTTP 401/.test(msg)) {
+      // A 401 from the DEFAULT host after the pin swapped the stored host out
+      // is not "already disconnected": the key may still be live wherever the
+      // file pointed (a self-hosted server without NODE9_API_HOST_ALLOW in
+      // this shell). Say what happened instead of reporting success.
+      if (rejected) {
+        return {
+          outcome: 'unreachable',
+          detail: `stored apiUrl ${rejected} is not an allowed host (set ${HOST_ALLOW_ENV} for self-hosted); the revoke went to ${base} and was refused`,
+        };
+      }
+      return { outcome: 'already' };
+    }
     return { outcome: 'unreachable', detail: msg };
   }
 }
@@ -64,10 +87,7 @@ export function registerLogoutCommand(program: Command): void {
 
       // 1. Cloud first, while we still hold the key. Best-effort: an offline
       //    logout still logs out locally, but says so honestly.
-      const res = await revokeSelf({
-        apiKey: entry.apiKey,
-        apiUrl: entry.apiUrl || 'https://api.node9.ai/api/v1/intercept',
-      });
+      const res = await revokeSelf({ apiKey: entry.apiKey, apiUrl: entry.apiUrl });
       if (res.outcome === 'revoked') {
         console.log(
           chalk.green(
@@ -77,7 +97,7 @@ export function registerLogoutCommand(program: Command): void {
       } else if (res.outcome === 'already') {
         console.log(chalk.gray('✓ Cloud: this machine was already disconnected.'));
       } else {
-        console.log(chalk.yellow(`⚠ Could not reach the cloud (${res.detail}).`));
+        console.log(chalk.yellow(`⚠ Could not reach the cloud (${safeMessage(res.detail)}).`));
         console.log(
           chalk.yellow('  The key was removed locally, but is still listed in the dashboard —')
         );

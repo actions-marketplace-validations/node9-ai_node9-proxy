@@ -10,6 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { classifySsrf } from '@node9/policy-engine';
 
 export type EgressMode = 'off' | 'review' | 'block';
 
@@ -19,6 +20,11 @@ export interface EgressBlock {
   allow: string[];
   deny: string[];
   allowPrivate: boolean;
+  /** SSRF floor, strict tier: also block loopback and the private ranges. */
+  ssrfStrict: boolean;
+  /** SSRF floor exemptions. Only an OVERRIDABLE tier can be exempted; a
+   *  protected address stays blocked whatever this list says. */
+  ssrfAllow: string[];
 }
 
 export const DEFAULT_EGRESS: EgressBlock = {
@@ -27,6 +33,8 @@ export const DEFAULT_EGRESS: EgressBlock = {
   allow: [],
   deny: [],
   allowPrivate: true,
+  ssrfStrict: false,
+  ssrfAllow: [],
 };
 
 // The on-disk config is an arbitrary JSON bag; we only ever touch policy.egress.
@@ -100,6 +108,46 @@ export function addEgressHost(list: 'allow' | 'deny', host: string): void {
   const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
   const updated = current[list].includes(host) ? current[list] : [...current[list], host];
   applyEgress(config, { [list]: updated });
+  writeEgressRawConfig(config);
+}
+
+/**
+ * Append an address to the SSRF exemption list (idempotent). Refuses a
+ * protected address HERE, at the keystroke: the config layer drops such an
+ * entry at load time, which left a user who typed one believing the exemption
+ * existed. Throws on a malformed config.
+ */
+export function addSsrfExemption(address: string): void {
+  // A range is judged by its BASE address, the same rule sanitizeSsrfAllow
+  // applies at load and the CLI applies at the keystroke. The writer keeps its
+  // own guard rather than trusting the caller: it is the one place every
+  // surface goes through, and today's only caller having checked first is not
+  // a property the next caller inherits.
+  const slash = address.indexOf('/');
+  const m = classifySsrf(slash === -1 ? address : address.slice(0, slash));
+  if (m && !m.overridable) {
+    throw new Error(
+      `${address} ${slash === -1 ? 'is a protected address' : 'covers only protected addresses'} ` +
+        `(${m.tier}) and cannot be exempted by anyone. ` +
+        `This is the one part of the floor no setting releases.`
+    );
+  }
+  const config = readEgressRawConfig();
+  const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
+  // A hand-edited scalar here used to be spread per CHARACTER: "10.0.0.1"
+  // became ["1","0",".",…] and the command still reported success. Refuse and
+  // say so rather than rewriting a file we cannot read as intended.
+  if (existing.ssrfAllow !== undefined && !Array.isArray(existing.ssrfAllow)) {
+    throw new Error(
+      `${egressConfigPath()} has policy.egress.ssrfAllow set to something that is not a list — ` +
+        `fix it before adding an exemption (refusing to overwrite).`
+    );
+  }
+  const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
+  const updated = current.ssrfAllow.includes(address)
+    ? current.ssrfAllow
+    : [...current.ssrfAllow, address];
+  applyEgress(config, { ssrfAllow: updated });
   writeEgressRawConfig(config);
 }
 

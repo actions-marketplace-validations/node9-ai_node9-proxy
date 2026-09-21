@@ -17,6 +17,7 @@ import {
 } from '../../sandbox/config';
 import { compileAllowlist } from '../../sandbox/firewall';
 import { renderDockerfile, renderEntrypoint, pinnedNode9Version } from '../../sandbox/templates';
+import { atomicWriteSync } from '../../utils/atomic-write';
 import {
   agentCredentialsMount,
   buildRunArgs,
@@ -64,13 +65,17 @@ export function registerSandboxCommand(program: Command, version: string): void 
     .action((opts: { agent: string }) => {
       const agent = (opts.agent === 'codex' ? 'codex' : 'claude') as SandboxAgent;
       const p = sandboxConfigPath();
-      if (fs.existsSync(p)) {
+      // Exclusive create: existsSync-then-write would let a concurrent run
+      // clobber a config the user had already started editing.
+      try {
+        fs.writeFileSync(p, scaffoldSandboxYaml(agent), { flag: 'wx' });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
         console.log(
           chalk.yellow(`  ${SANDBOX_CONFIG_FILE} already exists — leaving it untouched.`)
         );
         return;
       }
-      fs.writeFileSync(p, scaffoldSandboxYaml(agent));
       console.log(
         chalk.green(`  ✓ wrote ${SANDBOX_CONFIG_FILE}`) + chalk.dim(` (agent: ${agent})`)
       );
@@ -143,7 +148,7 @@ export function registerSandboxCommand(program: Command, version: string): void 
           console.error(chalk.red('  build failed.'));
           process.exit(b.status ?? 1);
         }
-        fs.writeFileSync(hashFile, hash);
+        atomicWriteSync(hashFile, hash);
       }
 
       // 4. Seed the in-box config (terminal-only approval) + run.

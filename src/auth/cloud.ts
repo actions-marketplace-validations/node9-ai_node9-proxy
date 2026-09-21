@@ -5,6 +5,8 @@ import os from 'os';
 import path from 'path';
 import { type RiskMetadata } from '../context-sniper';
 import { HOOK_DEBUG_LOG } from '../audit';
+import { safeMessage } from '../utils/safe-text';
+import { readCappedText } from '../utils/read-capped';
 
 export interface CloudApprovalResult {
   approved: boolean;
@@ -25,6 +27,11 @@ const DLP_PATTERN_MAX_LEN = 100;
 const KNOWN_CHECKED_BY = new Set([
   'dlp-block',
   'observe-mode-dlp-would-block',
+  // Decoy credentials (canary): a planted value appeared in tool args, a
+  // prompt, or (response variant) an assistant reply. See canary-design.md H1.
+  'dlp-canary-block',
+  'observe-mode-dlp-canary-would-block',
+  'dlp-canary-response',
   'dlp-review-flagged',
   'loop-detected',
   'audit-mode',
@@ -55,35 +62,16 @@ const KNOWN_CHECKED_BY = new Set([
 ]);
 
 /**
- * Validates the audit URL before we send the bearer token to it.
+ * The apiUrl pin, re-exported so existing importers keep working.
  *
- * Threat model: `creds.apiUrl` originates from `$NODE9_API_URL` or
- * `~/.node9/credentials.json`. Both are local-user-controlled but a
- * supply-chain compromise, malicious installer, or env-var injection from a
- * parent process could redirect audit traffic — including the API key in the
- * Authorization header — to an attacker-controlled host. We require HTTPS,
- * with a narrow exception for loopback addresses used by tests/dev fixtures.
- *
- * Returns the parsed URL on success, or null when the URL is malformed,
- * uses a non-HTTPS scheme on a non-loopback host, or contains userinfo.
+ * This file used to define its own validateApiUrl: scheme and userinfo only,
+ * any https host accepted. It predated the host pin in auth/api-url (#335),
+ * shared its name, and the audit shipper imported it, so the shipper had a
+ * guard that let `https://evil.example.com` through. One function, one
+ * strength: the real pin lives in auth/api-url and nowhere else.
  */
-export function validateApiUrl(raw: string): URL | null {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  // Reject userinfo (`https://attacker@real.host`) — the Bearer token is
-  // already in the Authorization header; userinfo here is always a smell.
-  if (u.username || u.password) return null;
-  if (u.protocol === 'https:') return u;
-  if (u.protocol === 'http:') {
-    const h = u.hostname;
-    if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]') return u;
-  }
-  return null;
-}
+import { validateApiUrl } from './api-url';
+export { validateApiUrl };
 
 /**
  * Send an audit record to the SaaS backend for a locally fast-pathed call.
@@ -218,9 +206,12 @@ export async function initNode9SaaS(
   if (process.env.CI) {
     try {
       const ciContextPath = path.join(os.homedir(), '.node9', 'ci-context.json');
-      const stats = fs.statSync(ciContextPath);
-      if (stats.size > 10_000) throw new Error('ci-context.json exceeds 10 KB');
-      const raw = fs.readFileSync(ciContextPath, 'utf8');
+      // Cap enforced by the read, not by a prior stat: the agent writes this
+      // file, so a swap between the two would defeat the 10 KB limit.
+      const ci = readCappedText(ciContextPath, 10_000);
+      if (!ci) throw new Error('ci-context.json unreadable');
+      if (ci.truncated) throw new Error('ci-context.json exceeds 10 KB');
+      const raw = ci.text;
       const parsed = JSON.parse(raw) as unknown;
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('ci-context.json is not a plain object');
@@ -363,13 +354,13 @@ export async function resolveNode9SaaS(
     if (!res.ok) {
       fs.appendFileSync(
         HOOK_DEBUG_LOG,
-        `[resolve-cloud] PATCH ${resolveUrl} → HTTP ${res.status}\n`
+        `[resolve-cloud] PATCH ${safeMessage(resolveUrl, 200)} → HTTP ${res.status}\n`
       );
     }
   } catch (err) {
     fs.appendFileSync(
       HOOK_DEBUG_LOG,
-      `[resolve-cloud] PATCH failed for ${requestId}: ${(err as Error).message}\n`
+      `[resolve-cloud] PATCH failed for ${safeMessage(requestId, 64)}: ${safeMessage(err)}\n`
     );
   }
 }

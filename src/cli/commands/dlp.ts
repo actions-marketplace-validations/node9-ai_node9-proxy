@@ -8,6 +8,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { safeMessage } from '../../utils/safe-text';
 
 const AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 const RESOLVED_FILE = path.join(os.homedir(), '.node9', 'dlp-resolved.json');
@@ -18,11 +19,6 @@ interface DlpEntry {
   dlpPattern?: string;
   dlpSample?: string;
   project?: string;
-}
-
-const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g;
-function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, '');
 }
 
 function loadResolved(): Set<string> {
@@ -139,10 +135,10 @@ export function registerDlpCommand(program: Command): void {
           chalk.dim('  ' + fmtDate(e.ts))
       );
       if (e.dlpSample) {
-        console.log('     ' + chalk.dim('Sample: ') + chalk.yellow(stripAnsi(e.dlpSample)));
+        console.log('     ' + chalk.dim('Sample: ') + chalk.yellow(safeMessage(e.dlpSample)));
       }
       if (e.project) {
-        console.log('     ' + chalk.dim('Project: ') + chalk.dim(stripAnsi(e.project)));
+        console.log('     ' + chalk.dim('Project: ') + chalk.dim(safeMessage(e.project)));
       }
       console.log('');
     }

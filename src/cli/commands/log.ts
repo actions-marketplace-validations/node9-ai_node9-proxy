@@ -37,6 +37,7 @@ import {
   canonicalToolInput,
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
+import { stripControlChars } from '../../utils/safe-text';
 
 // Patterns for common test runners
 const TEST_COMMAND_RE =
@@ -66,11 +67,6 @@ function detectTestResult(command: string, output: string): 'pass' | 'fail' | nu
 const CONFIDENCE_RANK: Record<InjectionConfidence, number> = { low: 0, medium: 1, high: 2 };
 function atLeastConfidence(c: InjectionConfidence, min: 'medium' | 'high'): boolean {
   return CONFIDENCE_RANK[c] >= CONFIDENCE_RANK[min];
-}
-
-function sanitize(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
 /**
@@ -184,7 +180,7 @@ export function registerLogCommand(program: Command): void {
           // `unknown` row to audit.log.
           if (payload.toolCall === null) process.exit(0);
 
-          const rawToolName = sanitize(extractToolName(payload, 'unknown'));
+          const rawToolName = stripControlChars(extractToolName(payload, 'unknown'));
           const tool = canonicalToolName(rawToolName);
           const rawInput = canonicalToolInput(rawToolName, extractToolInput(payload));
 

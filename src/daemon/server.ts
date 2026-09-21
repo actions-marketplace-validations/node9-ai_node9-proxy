@@ -768,7 +768,11 @@ export function startDaemon(): void {
     if (req.method === 'GET' && pathname === '/state/check') {
       const predicatesParam = reqUrl.searchParams.get('predicates') ?? '';
       const predicates = predicatesParam.split(',').filter(Boolean);
-      const results: Record<string, boolean> = {};
+      // Null prototype: the predicate names come straight off the query string,
+      // and on a plain `{}` a predicate called `__proto__` would hit the
+      // inherited setter instead of becoming an own property, dropping it from
+      // the response rather than answering it.
+      const results: Record<string, boolean> = Object.create(null) as Record<string, boolean>;
       for (const p of predicates) {
         results[p] = sessionHistory.checkPredicate(p);
       }
@@ -939,6 +943,7 @@ export function startDaemon(): void {
           bashCalls: 0,
           findings: [],
           dlpFindings: [],
+          canaryFindings: [],
           loopFindings: [],
           totalCostUSD: 0,
           firstDate: null,

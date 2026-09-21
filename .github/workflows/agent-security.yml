@@ -6,14 +6,16 @@ name: node9 agent-security
 on: pull_request
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
 jobs:
   scan:
+    permissions:
+      contents: read
+      pull-requests: write # the sticky PR comment
+      checks: write # the check-run
     runs-on: ubuntu-latest
     steps:
       # Local `uses: ./` needs the repo checked out first so action.yml is found.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./
         with:
           fail-on: high

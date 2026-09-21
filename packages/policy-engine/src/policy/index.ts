@@ -6,6 +6,9 @@
 // to touch the host system arrives via the hooks parameter.
 
 import type { SmartRule } from '../types';
+import { extractShellDestTokens } from '../shell/index';
+import { ssrfFloor } from '../egress/ssrf';
+import { ssrfDestinationFloor, extractToolDestinations } from '../egress/destinations';
 import { scanArgs } from '../dlp';
 import {
   detectDangerousShellExec,
@@ -24,7 +27,7 @@ import {
 import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
-import { evaluateEgress, type EgressPolicy } from '../egress';
+import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -118,6 +121,19 @@ export interface PolicyVerdict {
   matchedField?: string;
   matchedWord?: string;
   tier?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  /**
+   * False when NO human may override this verdict: the SSRF tier-1 floors,
+   * whose own reason string already tells the user "This address cannot be
+   * allowlisted". Absent means an override is a legitimate product decision,
+   * which is every other verdict.
+   *
+   * It exists because the host downgrades a hard block into a review whenever a
+   * human approver is reachable (orchestrator.ts, `mayDowngrade`). That is right
+   * for a smart-rule block and wrong for a floor, and the host could not tell
+   * the two apart: `overridable` was computed in egress/ssrf.ts, rendered into
+   * the reason sentence, and then dropped here.
+   */
+  overridable?: boolean;
   ruleName?: string;
   /** State predicates from the matched smart rule (only when decision is 'block'). */
   dependsOnStatePredicates?: string[];
@@ -305,6 +321,27 @@ function pipeChainVerdict(
  * provenance verdict, sandbox allow, dangerous-word review, or strict-mode
  * fallback. See the design doc for the full tier table.
  */
+/**
+ * ONE egress verdict shape, for both carriers. The shell branch and the
+ * tool branch built this separately for one commit and already disagreed on
+ * how to spell ruleName; `eg.binary` IS the tool name for a tool carrier and
+ * the binary for a shell one, so it is the single right subject for both.
+ *
+ * `overridable` is deliberately unset: the egress POLICY is overridable (an
+ * allowlist entry lifts it). Only the SSRF floor carries overridable: false.
+ */
+function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
+  return {
+    decision: eg.verdict,
+    blockedByLabel:
+      eg.verdict === 'block' ? '🌐 Node9 Egress (Blocked)' : '🌐 Node9 Egress (Review)',
+    reason: eg.reason,
+    ruleName: `egress:${eg.binary}:${eg.host}`,
+    ruleDescription: eg.reason,
+    tier: eg.verdict === 'block' ? 3 : 4,
+  };
+}
+
 export async function evaluatePolicy(
   config: PolicyConfig,
   toolName: string,
@@ -337,10 +374,76 @@ export async function evaluatePolicy(
     }
   }
 
+  // ── SSRF floor, non-shell destinations ──────────────────────────────────
+  // A tool that fetches a URL itself reaches a protected address without ever
+  // producing a shell command, so the floor below would never see it. Judged
+  // by a CLOSED LIST of tool + argument paths: there is no seam that reaches
+  // WebFetch without also reaching Grep and an Agent prompt, and a
+  // false-positive corpus found six families where nothing tells a
+  // destination apart from a mention. See egress/destinations.ts.
+  //
+  // Placed BEFORE the ignoredTools fast path, for the same reason the DLP
+  // scanner above is: `webfetch`, `get_*`, `read_*` and `list_*` are all on
+  // that list, so anything after it is dead code for exactly the tools that
+  // carry this gap. Measured: with the check one block lower, WebFetch still
+  // reached the metadata endpoint while `navigate` was blocked.
+  //
+  // Here, in the engine, so `node9 explain`, `simulate` and the posture probes
+  // inherit it and cannot disagree with the gate. The orchestrator calls the
+  // same function on the live hook path, where evaluatePolicy is never reached
+  // for an ignored tool at all.
+  {
+    const dest = ssrfDestinationFloor(toolName, args, {
+      ssrfAllow: config.policy.egress?.ssrfAllow,
+      ssrfStrict: config.policy.egress?.ssrfStrict,
+    });
+    if (dest) {
+      return {
+        decision: 'block',
+        blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+        reason: dest.reason,
+        ruleName: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
+        ruleDescription: dest.reason,
+        tier: 3,
+        overridable: dest.overridable,
+      };
+    }
+  }
+
+  // ── Egress policy, non-shell destinations (G10) ──────────────────────────
+  // The shell branch applies evaluateEgress to curl/wget/…; a tool that
+  // fetches a URL itself never has a shellCommand, so that branch cannot see
+  // it (measured 2026-09-20: curl to an unknown host denied, the same URL
+  // through WebFetch / MCP fetch / navigate allowed). Same closed list as the
+  // floor above, same evaluator as the shell branch, one verdict builder.
+  //
+  // COMPUTED here, RETURNED later. The fast path below returns for an ignored
+  // tool (WebFetch is on ignoredTools), so the verdict has to exist before
+  // it; but returning it here put it ahead of smart rules, while the shell
+  // branch sits AFTER them, and a user `block` rule on a tool carrier was
+  // downgraded to this review (measured). So it is held and returned at the
+  // two points that mirror the shell law: at the fast path for an ignored
+  // tool, and after the smart-rule section for everything else.
+  //
+  // The floor already ran, so a tier-1 address is a non-overridable block and
+  // never reaches this policy.
+  const pendingToolEgress: PolicyVerdict | undefined = config.policy.egress?.enabled
+    ? (() => {
+        const dests = extractToolDestinations(toolName, args);
+        const eg = dests.length > 0 ? evaluateEgress(dests, config.policy.egress) : null;
+        return eg ? egressPolicyVerdict(eg) : undefined;
+      })()
+    : undefined;
+
   // 1. Ignored tools (Fast Path) - Always allow these first
   // Task #20: the jail guard sets skipIgnoredFastPath after finding a jailed
   // path in a file-tool call — the shield's rules must get to speak.
-  if (wouldBeIgnored && !context.skipIgnoredFastPath) return { decision: 'allow' };
+  // G10: an ignored tool that declared a destination the egress policy
+  // actions gets that verdict instead of the silent allow. Smart rules never
+  // ran for an ignored tool before this change and still do not.
+  if (wouldBeIgnored && !context.skipIgnoredFastPath) {
+    return pendingToolEgress ?? { decision: 'allow' };
+  }
 
   // ONE definition of "this tool carries a shell command": a BASH_TOOL_NAMES
   // spelling, or a toolInspection 'command' field (terminal.execute). Every
@@ -366,6 +469,9 @@ export async function evaluatePolicy(
   // AST/regex interference. Mirrors the CLI scan's per-agent gates
   // (scan.ts:1037, 1319, 1614).
   const bashCommand = agent !== 'Terminal' ? shellShapedCommand : null;
+  // A tier-2 REVIEW (a credential copy) carried past the smart-rules tier so a
+  // stricter rule can still win. See the analyzeFsOperation site below.
+  let pendingAstReview: PolicyVerdict | undefined;
 
   // Layer-1 invariant: built-in AST blocks (block-rm-rf-home, project-jail
   // sensitive-file reads) must fire BEFORE user smart rules so a permissive
@@ -385,7 +491,7 @@ export async function evaluatePolicy(
     if (fsVerdict) {
       const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
       const labelPrefix = isShieldRule ? 'project-jail (AST)' : 'Node9 (AST)';
-      return {
+      const astVerdict: PolicyVerdict = {
         decision: fsVerdict.verdict,
         blockedByLabel: `${labelPrefix}: ${fsVerdict.ruleName}`,
         reason: fsVerdict.reason,
@@ -393,6 +499,17 @@ export async function evaluatePolicy(
         ruleName: fsVerdict.ruleName,
         ruleDescription: fsVerdict.reason,
       };
+      // A BLOCK returns here, ahead of user rules, so a permissive rule cannot
+      // bypass it (the layer-1 invariant above). A REVIEW must NOT: stage 4
+      // (2026-09-12) made a credential COPY a review, and returning it at tier 2
+      // silenced an org/user jail rule that BLOCKS the same path -- `jail add
+      // ~/.ssh` or managedConfig.jailPaths -- which fired before the AST tier
+      // learned copies (/code-review, cross-file tracer). Two verdicts on one
+      // input resolve by MAX, never by order: the review is carried to the
+      // tier-3 candidates, where a stricter rule still wins and a permissive
+      // `allow` rule cannot silence it.
+      if (fsVerdict.verdict === 'block') return astVerdict;
+      pendingAstReview = astVerdict;
     }
 
     // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /
@@ -484,8 +601,11 @@ export async function evaluatePolicy(
     );
     const matchedRule = resolvePinned(matches);
     if (matchedRule) {
+      // A permissive user rule cannot silence a built-in review.
       if (matchedRule.verdict === 'allow')
-        return { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool };
+        return (
+          pendingAstReview ?? { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool }
+        );
       return {
         decision: matchedRule.verdict,
         blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
@@ -511,6 +631,12 @@ export async function evaluatePolicy(
   let pathTokens: string[] = [];
 
   // 3. Tokenize the input
+  // G10: the held tool-egress verdict, now that the smart-rule section has
+  // had its say (a matching `allow` rule returned above and lifted it, which
+  // is exactly what happens on the shell path). Before the shell branch and
+  // before dangerous words, mirroring where the shell branch sits.
+  if (pendingToolEgress) return pendingToolEgress;
+
   const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
   if (shellCommand) {
     const analyzed: ShellCommandAnalysis = analyzeShellCommand(shellCommand);
@@ -538,6 +664,7 @@ export async function evaluatePolicy(
     // Note this deliberately does NOT change `resolvePinned` for user smart
     // rules — there the law is first-match, and allow-lists depend on it.
     const candidates: PolicyVerdict[] = [];
+    if (pendingAstReview) candidates.push(pendingAstReview);
 
     // Eval-remote — Class A, no knob. Kept as an immediate return: it is the
     // one built-in that can never be softened, so nothing later can raise it.
@@ -591,6 +718,36 @@ export async function evaluatePolicy(
     const builtin = strictestVerdict(candidates);
     if (builtin) return builtin;
 
+    // ── SSRF floor ──────────────────────────────────────────────────────────
+    // Addresses no agent tool call has a legitimate reason to reach. Runs
+    // BEFORE the egress policy and OUTSIDE its enabled guard: measured, the
+    // cloud metadata endpoint was reachable in three of the four realistic
+    // egress configurations, including the shipped default. It lives here
+    // rather than in the orchestrator so `node9 explain`, `simulate` and the
+    // posture probes, which call evaluatePolicy directly, inherit one
+    // implementation and cannot disagree with the gate.
+    //
+    // Its own token pass, not extractShellDestinations: parseDestHost requires
+    // a dot, so `curl 2852039166/latest/meta-data/` produced no destination at
+    // all and was allowed even with that exact string in egress.deny.
+    {
+      const ssrf = ssrfFloor(extractShellDestTokens(shellCommand), {
+        ssrfAllow: config.policy.egress?.ssrfAllow,
+        ssrfStrict: config.policy.egress?.ssrfStrict,
+      });
+      if (ssrf) {
+        return {
+          decision: 'block',
+          blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+          reason: ssrf.reason,
+          ruleName: `ssrf:${ssrf.tier}:${ssrf.binary}:${ssrf.host}`,
+          ruleDescription: ssrf.reason,
+          tier: 3,
+          overridable: ssrf.overridable,
+        };
+      }
+    }
+
     // ── Egress / destination control (GAP-5) ────────────────────────────────
     // Gate WHERE network tools send data (curl/wget/scp/ssh/nc) against the
     // egress allow/deny policy. Opt-in (egress.enabled). Catches exfil to an
@@ -601,17 +758,7 @@ export async function evaluatePolicy(
       const dests = extractShellDestinations(shellCommand);
       if (dests.length > 0) {
         const eg = evaluateEgress(dests, config.policy.egress);
-        if (eg) {
-          return {
-            decision: eg.verdict,
-            blockedByLabel:
-              eg.verdict === 'block' ? '🌐 Node9 Egress (Blocked)' : '🌐 Node9 Egress (Review)',
-            reason: eg.reason,
-            ruleName: `egress:${eg.binary}:${eg.host}`,
-            ruleDescription: eg.reason,
-            tier: eg.verdict === 'block' ? 3 : 4,
-          };
-        }
+        if (eg) return egressPolicyVerdict(eg);
       }
     }
 

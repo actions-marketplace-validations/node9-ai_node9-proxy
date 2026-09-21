@@ -43,12 +43,22 @@ export {
   detectInlineExec,
   AST_FS_REGEX_RULES,
   FS_READ_TOOLS,
+  COMMAND_WRAPPERS,
+  NET_BINARIES,
+  positionedArgs,
+  PATTERN_VERB_NAMES,
+  patternShapeOf,
+  fileOperandFlagsOf,
+  COPY_VERBS,
+  sampleCopyCommand,
+  type PositionedArg,
+  unwrapCommandHead,
   extractShellDestinations,
   parseDestHost,
 } from './shell';
 
 // Egress / destination policy (GAP-5).
-export type { EgressPolicy, EgressVerdict } from './egress';
+export type { EgressPolicy, EgressVerdict, Destination } from './egress';
 export { evaluateEgress, isPrivateHost, hostMatches, DEFAULT_EGRESS_ALLOWLIST } from './egress';
 
 // Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.
@@ -75,6 +85,12 @@ export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules
 
 // Regex utilities — ReDoS-safe validation + LRU-cached compilation.
 export { validateRegex, getCompiledRegex } from './utils/regex';
+
+// Control-character / terminal-escape sanitizers. One home for what used to be
+// nine copies of three regexes across the proxy and the engine. Three
+// functions, not one: see the module header for why flattening them corrupts
+// scan previews.
+export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/safe-text';
 
 // Shields — 11 builtin definitions + pure validators (no fs).
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
@@ -107,7 +123,7 @@ export {
 // a network-safe summary the proxy pushes to the SaaS on every policy-sync
 // tick. Pure: host code does the I/O, engine sanitises + sorts.
 export type { BlastFinding, BlastEnvFinding, BlastResult, BlastSummary } from './blast';
-export { summarizeBlast, truncateBlastPath } from './blast';
+export { summarizeBlast, truncateBlastPath, MAX_BLAST_PATH } from './blast';
 
 // Scan summarization — forward-only watermark scanner output, reduced to
 // counts-only summary the proxy pushes to the SaaS on every policy-sync
@@ -160,3 +176,27 @@ export {
   CANONICAL_EXTRACTOR_VERSION,
   CANONICAL_EXTRACTOR_HASH,
 } from './scan/canonical';
+
+// Canary (decoy credential) matcher; pure. Registry and planting live in the proxy.
+export { matchCanary, matchCanaryArgs, CANARY_MIN_LENGTH } from './dlp/canary';
+export type { CanaryValue, CanaryHit, CanaryView } from './dlp/canary';
+
+// SSRF floor: protected addresses, checked before and independently of the
+// egress policy. See doc/roadmap/active/ssrf-floor-design.md.
+export {
+  normalizeIpLiteral,
+  classifySsrf,
+  ssrfFloor,
+  isStrictGatedTier,
+  ssrfReason,
+  ssrfExemptMatches,
+  SSRF_MAX_HOST,
+} from './egress/ssrf';
+export {
+  ssrfDestinationFloor,
+  extractToolDestinations,
+  DESTINATION_ARGS,
+} from './egress/destinations';
+export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egress/ssrf';
+export { extractShellDestTokens } from './shell/index';
+export type { ShellDestToken } from './shell/index';

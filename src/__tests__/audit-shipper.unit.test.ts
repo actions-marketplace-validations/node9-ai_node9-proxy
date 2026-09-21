@@ -15,7 +15,10 @@ import {
 } from '../daemon/audit-shipper';
 import { generateEventId, buildArgsPreview } from '../audit';
 
-const CREDS = { apiKey: 'n9_live_test', apiUrl: 'https://api.example.com/api/v1/intercept' };
+// The real host: buildBatchEndpoint runs the apiUrl pin, which refuses any
+// other https host. The old fixture (api.example.com) passed only while the
+// shipper imported a scheme-only twin of validateApiUrl.
+const CREDS = { apiKey: 'n9_live_test', apiUrl: 'https://api.node9.ai/api/v1/intercept' };
 
 function row(over: Record<string, unknown> = {}): string {
   return (
@@ -259,7 +262,7 @@ describe('shipOnce', () => {
     const res = await shipOnce(deps(impl));
 
     expect(res).toEqual({ status: 'shipped', shipped: 3 });
-    expect(calls[0].url).toBe('https://api.example.com/api/v1/intercept/audit/batch');
+    expect(calls[0].url).toBe('https://api.node9.ai/api/v1/intercept/audit/batch');
     expect(calls[0].rows).toHaveLength(3);
     const wm = readWatermark(watermarkPath);
     expect(wm?.offset).toBe(fs.statSync(auditLogPath).size);

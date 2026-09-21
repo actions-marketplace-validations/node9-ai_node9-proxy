@@ -8,6 +8,7 @@
 // never leaves the module.
 
 import safeRegex from 'safe-regex2';
+import { validateWif, validateXprv } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
 
@@ -36,6 +37,15 @@ interface DlpPattern {
    * Only set on broad patterns where the regex alone can't distinguish real secrets.
    */
   minEntropy?: number;
+  /**
+   * Structural validator run on the matched token (checksum, version byte).
+   * When present it DECIDES: a passing validator accepts the match outright,
+   * skipping the stopword and entropy heuristics (a checksum-valid token that
+   * happens to contain a stopword substring is a real secret, roughly 1 in
+   * 3,000 real WIF keys); a failing one rejects it. Must never throw; a throw
+   * is treated as "not suppressed" so a validator bug cannot hide a match.
+   */
+  validate?: (raw: string) => boolean;
 }
 
 // Matches variable assignment or config-file patterns that indicate a secret
@@ -257,6 +267,27 @@ export const DLP_PATTERNS: DlpPattern[] = [
     keywords: ['sg.'],
   },
 
+  // ── Cryptocurrency private keys (base58check-validated) ───────────────────
+  // Both are anchored with \b on each side: unanchored, `[KL][base58]{51}`
+  // matches INSIDE any longer base58 blob (an xprv, a Solana keypair, a
+  // Monero address). Lookbehind fails safe-regex2; \b is the house style
+  // (see the card regexes). Mainnet only, matching validateWif / validateXprv;
+  // testnet (WIF 0xEF, tprv) is deferred. Cost was measured: the WIF regex
+  // runs on every string (first keyword-less pattern) at 0.024 ms per 100 KB
+  // of prose, so no prefilter is warranted.
+  {
+    name: 'Bitcoin WIF Private Key',
+    regex: /\b(?:5[1-9A-HJ-NP-Za-km-z]{50}|[KL][1-9A-HJ-NP-Za-km-z]{51})\b/,
+    severity: 'block',
+    validate: validateWif,
+  },
+  {
+    name: 'Extended Private Key',
+    regex: /\b[xyz]prv[1-9A-HJ-NP-Za-km-z]{107}\b/,
+    severity: 'block',
+    keywords: ['xprv', 'yprv', 'zprv'],
+    validate: validateXprv,
+  },
   // ── Private keys (PEM) ────────────────────────────────────────────────────
   {
     name: 'Private Key (PEM)',
@@ -576,12 +607,31 @@ const DLP_PATTERNS_GLOBAL: Array<{ pattern: DlpPattern; globalRegex: RegExp }> =
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────
 // Blocks access attempts to credential/key files before their content is read.
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
-  /[/\\]\.ssh[/\\]/i,
-  /[/\\]\.aws[/\\]/i,
+  /[/\\]\.ssh([/\\]|$)/i,
+  /[/\\]\.aws([/\\]|$)/i,
   /[/\\]\.config[/\\]gcloud[/\\]/i,
   /[/\\]\.azure[/\\]/i,
   /[/\\]\.kube[/\\]config$/i,
-  /[/\\]\.env($|\.)/i, // .env, .env.local, .env.production — not .envoy
+  // ⚠️ ONE SEMANTIC, FOUR COPIES. This is the AST tier's `.env` rule verbatim
+  // (shell/index.ts SENSITIVE_PATH_RULES), whose reasoning is documented there:
+  // structural suffix chain rather than a hand-written list, `example|sample|
+  // template` exempt because a fixture stays a fixture whatever follows, and
+  // `.test` anchored because `test` names an ENVIRONMENT -- `.env.test` is the
+  // committed template, `.env.test.local` is gitignored and holds real values.
+  //
+  // It was previously `[/\\]\.env($|\.)` with NO exemptions, so `Read .env.example`
+  // blocked while `cat .env.example` allowed: the same file, opposite verdicts,
+  // decided only by which tool asked. See src/__tests__/jail-both-doors.test.ts,
+  // which is the contract that now holds these copies in step, and stage 5 of
+  // doc/credential-jail-architecture.md, which replaces them with one generated
+  // source.
+  // ⚠️ The `.local` branch comes FIRST and takes no exemption. A fixture stays a
+  // fixture whatever follows it -- `.env.example.md` is documentation -- but
+  // `.env.example.local` is gitignored by the `.env*.local` convention and holds
+  // real values, exactly the reasoning that anchors `(?!\.test$)` rather than
+  // using `\b`. Without this branch the fixture exemption also bought a two-step
+  // bypass: `cp .env .env.sample`, then read the copy.
+  /[/\\]\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i, // .env + any suffix chain; fixtures exempt unless .local
   /[/\\]\.git-credentials$/i,
   /[/\\]\.npmrc$/i,
   /[/\\]\.docker[/\\]config\.json$/i,
@@ -704,6 +754,52 @@ export const DLP_SCAN_LIMITS = {
  * Handles nested objects, arrays, and JSON-encoded strings.
  * Returns the first match found, or null if clean.
  */
+/**
+ * Should this matched token be suppressed? Single source of truth for the
+ * three DLP entrypoints (scanArgs, scanText, redactText); they used to carry
+ * three copies of the stopword + entropy sequence, and redactText had no test.
+ */
+function suppressed(pattern: DlpPattern, raw: string): boolean {
+  if (pattern.validate) {
+    let ok: boolean;
+    try {
+      ok = pattern.validate(raw);
+    } catch {
+      ok = true; // a crashing validator must not hide a block-severity match
+    }
+    return !ok;
+  }
+  if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) return true;
+  if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) return true;
+  return false;
+}
+
+/**
+ * First regex match of `pattern` in `text` that survives suppression, or null.
+ * OVERLAPPING: on rejection the scan resumes at match.index + 1, not after the
+ * rejected window. Otherwise a decoy that fails the validator and sits right in
+ * front of a real secret swallows it (the card-detector lesson, commit A). A
+ * fresh /g copy per call: no module-level lastIndex to leak.
+ */
+function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
+  const flags = pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g';
+  const re = new RegExp(pattern.regex.source, flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex = m.index + 1; // progress guard; these patterns never match empty
+      continue;
+    }
+    if (!suppressed(pattern, m[0])) return m[0];
+    // On rejection, exec's own lastIndex advance (to the end of the match) is
+    // sufficient: every DLP pattern is \b-anchored and separator-free, so a
+    // valid match can never begin INSIDE a rejected one. No overlap resume is
+    // needed here (unlike hasValidCard / hasValidIban, whose tokens contain
+    // spaces and keep their own resume, witnessed by the card and IBAN specs).
+  }
+  return null;
+}
+
 export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch | null {
   if (depth > MAX_DEPTH || args === null || args === undefined) return null;
 
@@ -738,26 +834,20 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
         continue;
       }
 
-      if (pattern.regex.test(text)) {
-        const raw = text.match(pattern.regex)?.[0] ?? '';
+      const raw = firstAcceptedMatch(pattern, text);
+      if (raw === null) continue;
 
-        // Stopword check: suppress common placeholders / template variables
-        if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) continue;
+      // Assignment context: promote review → block when the secret appears
+      // in an assignment (export TOKEN=..., password: ..., api_key = ...).
+      const severity = pattern.contextBoost && assignmentCtx ? 'block' : pattern.severity;
 
-        // Entropy guard: suppress low-entropy matches (repeated chars, sequential values)
-        if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) continue;
-
-        // Assignment context: promote review → block when the secret appears
-        // in an assignment (export TOKEN=..., password: ..., api_key = ...).
-        const severity = pattern.contextBoost && assignmentCtx ? 'block' : pattern.severity;
-
-        return {
-          patternName: pattern.name,
-          fieldPath,
-          redactedSample: maskSecret(text, pattern.regex),
-          severity,
-        };
-      }
+      return {
+        patternName: pattern.name,
+        fieldPath,
+        // Mask the ACCEPTED token, not the first regex hit in the field.
+        redactedSample: maskSecret(raw, pattern.regex),
+        severity,
+      };
     }
 
     // Try JSON-in-string: agents sometimes pass stringified JSON objects as a
@@ -787,17 +877,14 @@ export function scanText(text: string): DlpMatch | null {
     if (pattern.keywords && !pattern.keywords.some((kw) => tLower.includes(kw.toLowerCase()))) {
       continue;
     }
-    if (pattern.regex.test(t)) {
-      const raw = t.match(pattern.regex)?.[0] ?? '';
-      if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) continue;
-      if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) continue;
-      return {
-        patternName: pattern.name,
-        fieldPath: 'response-text',
-        redactedSample: maskSecret(t, pattern.regex),
-        severity: pattern.severity,
-      };
-    }
+    const raw = firstAcceptedMatch(pattern, t);
+    if (raw === null) continue;
+    return {
+      patternName: pattern.name,
+      fieldPath: 'response-text',
+      redactedSample: maskSecret(raw, pattern.regex),
+      severity: pattern.severity,
+    };
   }
   return null;
 }
@@ -821,9 +908,7 @@ export function redactText(text: string): { result: string; found: string[] } {
       continue;
     }
     result = result.replace(globalRegex, (match) => {
-      if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
-      if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
-        return match;
+      if (suppressed(pattern, match)) return match; // leave the text intact
       if (!found.includes(pattern.name)) found.push(pattern.name);
       return `[node9-redacted:${pattern.name}]`;
     });

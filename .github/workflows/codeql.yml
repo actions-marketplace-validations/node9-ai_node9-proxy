@@ -1,0 +1,47 @@
+# CodeQL — static analysis on every change to main and every pull request.
+#
+# Scorecard's SAST check scores 0 unless a SAST tool runs on all commits; this
+# is also the one pipelock runs (security.yaml). Results go to the Security tab
+# (code scanning), which is the right home for *code* findings — unlike the
+# Scorecard grade, which is a practice score and stays out of code scanning.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    - cron: '30 5 * * 1' # Mondays 05:30 UTC, after Scorecard
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+      actions: read # required by codeql-action on private repos; harmless here
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: javascript-typescript
+          # Suite and analysis scope both live in the config file so they stay
+          # in one place; see .github/codeql/codeql-config.yml for why tests and
+          # repo scripts are excluded. (security-and-quality would add the
+          # maintainability queries on top; widen there, deliberately.)
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: /language:javascript-typescript
