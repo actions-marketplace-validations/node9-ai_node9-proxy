@@ -315,6 +315,26 @@ export async function authorizeHeadless(
   return _authorizeHeadlessCore(toolName, args, meta, options);
 }
 
+/**
+ * The message shown when the gate asked for approval and nobody answered.
+ *
+ * Exported so the copy can be asserted directly: the live one is built inside
+ * a setTimeout in a promise race, and a test that drove the whole race would
+ * be proving the wording by reconstructing the thing that produces it.
+ *
+ * The second line is the point. This is the moment the product has just cost
+ * someone work, which makes it the one place a call to action is welcome
+ * rather than an interruption. It names `node9 login`, which with no argument
+ * opens the browser and needs nothing prepared -- unlike `node9 connect`,
+ * which requires a token minted in the dashboard.
+ */
+export function approvalTimeoutReason(approvalTimeoutMs: number): string {
+  return (
+    `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy. ` +
+    'Approve from your phone next time: run `node9 login`.'
+  );
+}
+
 async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
@@ -1474,7 +1494,7 @@ async function _authorizeHeadlessCore(
         const timer = setTimeout(() => {
           resolve({
             approved: false,
-            reason: `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy.`,
+            reason: approvalTimeoutReason(approvalTimeoutMs),
             blockedBy: 'timeout',
             blockedByLabel: 'Approval Timeout',
           });

@@ -8,6 +8,7 @@ import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
+import { getMachineId } from '../../machine-id';
 import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
 import {
   installDaemonService,
@@ -36,6 +37,19 @@ export interface TelemetryPayload {
   os: string;
   node9_version: string;
   first_install: boolean;
+  /**
+   * The machine's durable UUID from ~/.node9/machine-id -- the SAME id login
+   * binds the machine by, not a second telemetry-only one.
+   *
+   * Without it the ping has no identity, so the server can only count init
+   * runs and `first_install` has to guess from whether a config file exists.
+   * With it, a machine that runs `init` twice counts once, and an install can
+   * later be recognised as the machine that logged in.
+   *
+   * Random, never derived from hostname or user, so it says nothing about the
+   * machine by itself.
+   */
+  machine_id: string;
 }
 
 /**
@@ -52,6 +66,7 @@ export function buildTelemetryPayload(agents: string[], firstInstall: boolean): 
     os: process.platform,
     node9_version: node9Version(),
     first_install: firstInstall,
+    machine_id: getMachineId(),
   };
 }
 
