@@ -301,6 +301,82 @@ export interface SsrfFloorOptions {
   ssrfStrict?: boolean;
 }
 
+/**
+ * Does this exemption list release this address?
+ *
+ * ONE function, because the shell floor and the declared-URL floor must answer
+ * identically. They had two spellings of it — `normalizeIpLiteral(e) ?? e.trim()
+ * .toLowerCase()` here and `classifySsrf(a)?.normalized ?? a` in
+ * destinations.ts — and for an entry classifySsrf does not match they already
+ * disagreed. Nothing depended on the difference, which is exactly when it is
+ * cheap to remove.
+ *
+ * An entry is an exact address or a CIDR range. The range form exists so an
+ * operator can exempt the mesh-VPN range they actually use (100.64.0.0/10)
+ * instead of listing peers one at a time, which is what the settings panel's
+ * "remove this default" control needs.
+ *
+ * ⚠ This answers "is it in the list", NOT "may it be released". The caller
+ * keeps its `m.overridable` guard, and that guard is per ADDRESS, decided by
+ * classifySsrf before this is consulted. So a range can never release a
+ * protected address inside it: 100.100.100.200 (Alibaba IMDS) sits inside
+ * 100.64.0.0/10 and is named in METADATA_ADDRESSES above the range check, so
+ * it classifies as metadata / overridable:false and stays blocked with the
+ * whole range exempted. Pinned by E2 in exempt-range.spec.ts.
+ *
+ * Never throws: this runs on the hook path for every tool call, and a bad
+ * entry in a hand-edited config must not break every command on the machine.
+ */
+export function ssrfExemptMatches(
+  entries: readonly string[] | undefined,
+  normalized: string | undefined
+): boolean {
+  if (!entries?.length || !normalized) return false;
+  const target = bitsOf(normalized);
+  for (const raw of entries) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    const slash = entry.indexOf('/');
+    if (slash === -1) {
+      // Exact address: compare canonical forms, so `127.1`, `2130706433` and
+      // `127.0.0.1` are one entry, as they already were.
+      if ((normalizeIpLiteral(entry) ?? entry) === normalized) return true;
+      continue;
+    }
+    if (!target) continue;
+    const base = bitsOf(normalizeIpLiteral(entry.slice(0, slash)) ?? '');
+    const prefixText = entry.slice(slash + 1);
+    // `Number('')` is 0, not NaN, so an entry ending in a bare slash parsed
+    // as /0 and released every address in the family. Require actual digits.
+    const prefix = /^\d+$/.test(prefixText) ? Number(prefixText) : NaN;
+    if (
+      !base ||
+      !Number.isInteger(prefix) ||
+      prefix < 0 ||
+      // A v4 range never matches a v6 address, and the reverse: the widths
+      // differ, so `0.0.0.0/0` does not release `::1`.
+      base.length !== target.length ||
+      prefix > base.length
+    ) {
+      continue;
+    }
+    if (base.slice(0, prefix) === target.slice(0, prefix)) return true;
+  }
+  return false;
+}
+
+/** A normalized IP literal as a bit string, or null when it is not one. */
+function bitsOf(normalized: string): string | null {
+  const o = v4Octets(normalized);
+  if (o) {
+    return o.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
+      ? o.map((n) => n.toString(2).padStart(8, '0')).join('')
+      : null;
+  }
+  const g = expandIpv6(normalized);
+  return g ? g.map((n) => n.toString(2).padStart(16, '0')).join('') : null;
+}
+
 const TIER_REASON: Record<SsrfTier, string> = {
   metadata: 'a cloud instance-metadata endpoint, the classic credential-theft target',
   'link-local': 'a link-local address',
@@ -321,9 +397,6 @@ export function ssrfFloor(
   tokens: ReadonlyArray<{ token: string; binary: string }>,
   opts: SsrfFloorOptions = {}
 ): SsrfVerdict | null {
-  const exempt = new Set(
-    (opts.ssrfAllow ?? []).map((e) => normalizeIpLiteral(e) ?? e.trim().toLowerCase())
-  );
   for (const { token, binary } of tokens) {
     const m = classifySsrf(token);
     if (!m) continue;
@@ -331,8 +404,11 @@ export function ssrfFloor(
     // or an org turns the strict tier on. Everything not listed here blocks on
     // every machine, always.
     if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) continue;
-    // An exemption applies to overridable tiers only. Tier 1 has no allow path.
-    if (m.overridable && m.normalized && exempt.has(m.normalized)) continue;
+    // An exemption applies to overridable tiers only. Tier 1 has no allow
+    // path, which is also what keeps a RANGE entry safe: the guard is per
+    // address, so exempting 100.64.0.0/10 leaves the Alibaba IMDS address
+    // inside it blocked.
+    if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) continue;
     return { ...m, host: token, binary, reason: ssrfReason(m, token) };
   }
   return null;

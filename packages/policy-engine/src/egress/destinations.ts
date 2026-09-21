@@ -24,7 +24,13 @@
 //    family for free: under inet_aton the price 239.99 and roughly 6% of
 //    32-bit hashes fold to protected addresses, and none of them is ever a URL
 //    hostname.
-import { classifySsrf, isStrictGatedTier, ssrfReason, type SsrfMatch } from './ssrf';
+import {
+  classifySsrf,
+  isStrictGatedTier,
+  ssrfExemptMatches,
+  ssrfReason,
+  type SsrfMatch,
+} from './ssrf';
 import type { Destination } from './index';
 
 /**
@@ -148,7 +154,6 @@ export function ssrfDestinationFloor(
   try {
     const paths = DESTINATION_ARGS.get(bareToolName(toolName));
     if (!paths) return null;
-    const exempt = new Set((opts.ssrfAllow ?? []).map((a) => classifySsrf(a)?.normalized ?? a));
     for (const path of paths) {
       for (const value of valuesAt(args, path)) {
         const host = hostOf(value);
@@ -159,7 +164,7 @@ export function ssrfDestinationFloor(
         // functions rather than re-expressed here. Two spellings of one rule is
         // how the parts of this feature drifted apart all day.
         if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) continue;
-        if (m.overridable && m.normalized && exempt.has(m.normalized)) continue;
+        if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) continue;
         return { ...m, argPath: path, host, reason: ssrfReason(m, host) };
       }
     }

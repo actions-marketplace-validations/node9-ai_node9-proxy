@@ -87,9 +87,17 @@ describe('evaluateEgressConfig', () => {
     expect(kept.map((r) => r.title)).not.toContain(floor.title);
   });
 
-  it('P7 the floor row does not claim more than shell commands', () => {
-    // Review found WebFetch and MCP fetch tools reach the metadata endpoint
-    // unchecked, while this row said "blocked on this machine".
+  it('P7 the floor row states its real reach, and does not invert it', () => {
+    // 2026-09-08: this row said "blocked on this machine" while WebFetch and
+    // the MCP fetch tools reached the metadata endpoint unchecked, so the row
+    // was narrowed to "shell commands". 438cd16 closed that gap the SAME DAY,
+    // and the narrowed wording then understated the product for two weeks.
+    //
+    // The old assertion was /WebFetch|fetch tool/ on detail, which matched
+    // "not covered: WebFetch ... reach a URL without this gate" and its
+    // correction equally. It could not tell a claim from its opposite, which
+    // is exactly how the inversion survived. Measured: ssrf-pins.spec.ts has
+    // WebFetch to the metadata endpoint denied.
     const r = checkEgressFloor({
       enabled: true,
       mode: 'block',
@@ -97,15 +105,39 @@ describe('evaluateEgressConfig', () => {
       ssrfAllow: [],
       policySource: 'local',
     })[0];
-    // The TITLE is the line most readers stop at, so it carries the limit on
-    // its own. Checking title+what together let the title go back to "on this
-    // machine" while `what` quietly carried the caveat (mutation survived).
+    const body = `${r.what} ${r.detail.join(' ')}`;
+
+    // The TITLE is the line most readers stop at, so it carries its own limit.
     expect(r.title, 'the title alone must not claim the machine').not.toMatch(
       /on this machine|every machine/i
     );
-    expect(r.title, 'the title names the surface').toMatch(/shell command/i);
-    expect(r.what, 'so does the body').toMatch(/shell command/i);
-    expect(r.detail.join(' '), 'names what bypasses it').toMatch(/WebFetch|fetch tool/i);
+    expect(body, 'shell is covered').toMatch(/shell command/i);
+    expect(body, 'a declared URL is covered too').toMatch(/declare a URL|WebFetch/i);
+    expect(body, 'must not claim a URL-fetching tool bypasses the floor').not.toMatch(
+      /(WebFetch|fetch tool)[^.]*\b(not pass|bypass|unchecked|without this gate|never reach)/i
+    );
+    expect(body, 'the real gap is the interpreter one-liner').toMatch(
+      /node -e|python3 -c|interpreter/i
+    );
+  });
+
+  it('P7b the floor row does not list CGNAT as always blocked', () => {
+    // Measured on a default install: `curl http://100.64.0.5/` is ALLOWED.
+    // CGNAT is overridable and sits in STRICT_TIERS, so it belongs in the
+    // strict-tier detail line, never beside metadata.
+    const r = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+      policySource: 'local',
+    })[0];
+    // detail[1] is the always-blocked companion to detail[0] (the metadata
+    // endpoint); the strict-tier line that follows is where CGNAT belongs.
+    expect(r.detail[1], 'the always-blocked line must not name CGNAT').not.toMatch(
+      /100\.64|CGNAT/i
+    );
+    expect(r.detail.join(' '), 'but it is still disclosed').toMatch(/100\.64|CGNAT/i);
   });
 
   it('P8 the floor row is severity advisory, so a working floor is never a gap', () => {

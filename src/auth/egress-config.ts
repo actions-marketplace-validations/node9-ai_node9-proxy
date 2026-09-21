@@ -118,10 +118,17 @@ export function addEgressHost(list: 'allow' | 'deny', host: string): void {
  * existed. Throws on a malformed config.
  */
 export function addSsrfExemption(address: string): void {
-  const m = classifySsrf(address);
+  // A range is judged by its BASE address, the same rule sanitizeSsrfAllow
+  // applies at load and the CLI applies at the keystroke. The writer keeps its
+  // own guard rather than trusting the caller: it is the one place every
+  // surface goes through, and today's only caller having checked first is not
+  // a property the next caller inherits.
+  const slash = address.indexOf('/');
+  const m = classifySsrf(slash === -1 ? address : address.slice(0, slash));
   if (m && !m.overridable) {
     throw new Error(
-      `${address} is a protected address (${m.tier}) and cannot be exempted by anyone. ` +
+      `${address} ${slash === -1 ? 'is a protected address' : 'covers only protected addresses'} ` +
+        `(${m.tier}) and cannot be exempted by anyone. ` +
         `This is the one part of the floor no setting releases.`
     );
   }
