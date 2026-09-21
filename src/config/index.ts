@@ -47,10 +47,25 @@ import { safeApiUrl, DEFAULT_API_URL } from '../auth/api-url';
 export function sanitizeSsrfAllow(entries: string[], source: string): string[] {
   const kept: string[] = [];
   for (const entry of entries) {
-    const m = classifySsrf(entry);
+    // A range is classified by its BASE address. `169.254.0.0/16` is entirely
+    // link-local and can never release anything, so it is dropped for the same
+    // reason a bare protected address is: an entry listed as in force that
+    // does nothing is worse than a refusal.
+    //
+    // The limit, stated rather than hidden: this classifies the base, not
+    // every address in the range. `100.64.0.0/10` is kept even though Alibaba's
+    // metadata endpoint sits inside it — and that is safe because the floor's
+    // `m.overridable` guard is per address, so the endpoint stays blocked with
+    // the whole range exempted (exempt-range.spec.ts E2). Refusing such a
+    // range would mean walking it.
+    const base = entry.includes('/') ? entry.slice(0, entry.indexOf('/')).trim() : entry;
+    const m = classifySsrf(base);
     if (m && !m.overridable) {
+      const what = entry.includes('/')
+        ? 'covers only protected addresses'
+        : 'is a protected address';
       process.emitWarning(
-        `[node9] ${source} ssrfAllow entry "${entry}" is a protected address (${m.tier}) and cannot be exempted; ignoring it.`
+        `[node9] ${source} ssrfAllow entry "${entry}" ${what} (${m.tier}) and cannot be exempted; ignoring it.`
       );
       continue;
     }

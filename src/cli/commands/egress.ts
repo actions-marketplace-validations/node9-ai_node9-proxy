@@ -54,6 +54,76 @@ function exempt(address: string): boolean {
 }
 
 /**
+ * How internal addresses are treated. `allowPrivate` and `ssrfStrict` are one
+ * axis in sequence — the floor answers first, the policy second — so they get
+ * one verb and are ALWAYS written together. A stored pair that contradicts the
+ * displayed state is how the next reader gets it wrong.
+ *
+ * Until B1, `allowPrivate` was the one egress setting with no CLI at all. The
+ * cloud could set it (ManagedEgress.allowPrivate, lockable as
+ * egressAllowPrivate) and the dashboard had a control, so the only user who
+ * could not reach it was the one with nothing else.
+ */
+export type InternalState = 'allowed' | 'listed' | 'blocked';
+
+const INTERNAL_FIELDS: Record<InternalState, { ssrfStrict: boolean; allowPrivate: boolean }> = {
+  allowed: { ssrfStrict: false, allowPrivate: true },
+  listed: { ssrfStrict: false, allowPrivate: false },
+  blocked: { ssrfStrict: true, allowPrivate: false },
+};
+
+const INTERNAL_SAID: Record<InternalState, string> = {
+  allowed: 'reachable without listing them',
+  listed: 'reachable only if they are on your allowlist',
+  blocked: 'blocked',
+};
+
+/** The state a config is in. ssrfStrict wins: the floor answers before the policy. */
+export function readInternalState(e: {
+  ssrfStrict?: boolean;
+  allowPrivate?: boolean;
+}): InternalState {
+  if (e.ssrfStrict === true) return 'blocked';
+  return e.allowPrivate === false ? 'listed' : 'allowed';
+}
+
+function setInternal(value: string): void {
+  const state = value.trim().toLowerCase() as InternalState;
+  if (!(state in INTERNAL_FIELDS)) {
+    console.error(
+      chalk.red(`\n  ✗ Expected "allowed", "listed" or "blocked", got "${value}".`) +
+        chalk.gray(
+          '\n    allowed  loopback, 10/172.16/192.168 and CGNAT are reachable (default)\n' +
+            '    listed   they are reachable only if you allowlist them\n' +
+            '    blocked  they are blocked at the floor\n'
+        )
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!mutate(`egress internal ${state}`, INTERNAL_FIELDS[state])) return;
+  // The write landed in config.json, which is not the same as the value taking
+  // effect: on an org-managed machine the merge replaces it. Read the EFFECTIVE
+  // config back and report what is in force, rather than that a file was
+  // written. Both fields can be locked independently, so the check covers the
+  // resolved STATE, not one boolean.
+  _resetConfigCache();
+  const effective = readInternalState(getConfig().policy.egress);
+  if (effective !== state) {
+    console.log(
+      chalk.yellow(
+        `\n  ⚠ Saved, but not in effect: your workspace sets internal addresses to ` +
+          `${effective.toUpperCase()} and that governs this machine.\n` +
+          `    Change it in the dashboard, Enforcement → Network.\n`
+      )
+    );
+    return;
+  }
+  const line = `\n  ✓ Internal addresses: ${state} — loopback, the private ranges and CGNAT are ${INTERNAL_SAID[state]}.\n`;
+  console.log(state === 'allowed' ? chalk.yellow(line) : chalk.green(line));
+}
+
+/**
  * The SSRF floor, stated before the allow/deny lists: strongest first. Until
  * this block existed the floor blocked and no screen said it was there, so a
  * user only met it as a surprise at the moment of a block.
@@ -95,20 +165,25 @@ function showFloor(
         '    no setting releases these, though `node9 pause` suspends all enforcement'
     )
   );
-  const strict = e.ssrfStrict === true;
+  // The resolved STATE, not two booleans. `on/off` described one of the two
+  // fields and left the other unnamed, so a user could not read back what
+  // `egress internal` had set.
+  const state = readInternalState(e);
   const by =
     ssrfStrictSource === 'workspace'
       ? 'workspace (app.node9.ai)'
       : ssrfStrictSource === 'local'
         ? 'this machine (config.json)'
         : 'the shipped default';
+  const STATE_LABEL: Record<InternalState, string> = {
+    allowed: 'allowed',
+    listed: 'allowlist only',
+    blocked: 'blocked',
+  };
   console.log(
-    `    Internal addresses:  ${strict ? chalk.green('on') : chalk.yellow('off')}` +
-      chalk.gray(
-        strict
-          ? '  loopback, 10/172.16/192.168 and CGNAT are blocked too'
-          : '  loopback, 10/172.16/192.168 and CGNAT are reachable'
-      )
+    `    Internal addresses:  ${
+      state === 'blocked' ? chalk.green(STATE_LABEL[state]) : chalk.yellow(STATE_LABEL[state])
+    }` + chalk.gray(`  loopback, 10/172.16/192.168 and CGNAT are ${INTERNAL_SAID[state]}`)
   );
   console.log(chalk.gray(`    set by: ${by}`));
   const exemptions = e.ssrfAllow ?? [];
@@ -212,8 +287,16 @@ export function registerEgressCommand(program: Command): void {
 
   // `node9 egress` with no subcommand → status.
   egress
+    .command('internal <allowed|listed|blocked>')
+    .description(
+      'How loopback, private ranges and CGNAT are treated: allowed (default), ' +
+        'listed (must be on the allowlist), or blocked'
+    )
+    .action((value: string) => setInternal(value));
+
+  egress
     .command('strict <on|off>')
-    .description('Also block loopback and private ranges (the strict SSRF tier)')
+    .description('Deprecated alias for `egress internal blocked|allowed`')
     .action((value: string) => {
       const v = value.trim().toLowerCase();
       if (v !== 'on' && v !== 'off') {
@@ -221,51 +304,61 @@ export function registerEgressCommand(program: Command): void {
         process.exitCode = 1;
         return;
       }
-      if (!mutate(`egress strict ${v}`, { ssrfStrict: v === 'on' })) return;
-      // The write landed in config.json, which is not the same as the value
-      // taking effect: on an org-managed machine the merge replaces it. Read
-      // the EFFECTIVE config back and report what is actually in force, rather
-      // than reporting that a file was written.
-      _resetConfigCache();
-      const effective = getConfig().policy.egress.ssrfStrict === true;
-      if (effective !== (v === 'on')) {
-        console.log(
-          chalk.yellow(
-            `\n  ⚠ Saved, but not in effect: your workspace sets the strict tier ` +
-              `${effective ? 'ON' : 'OFF'} and that governs this machine.\n` +
-              `    Change it in the dashboard, Enforcement → Network.\n`
-          )
-        );
-        return;
-      }
-      console.log(
+      // `off` must not silently widen past what the user had: from `listed`,
+      // turning the tier off means `listed`, not `allowed`. Turning a tier off
+      // is not consent to stop requiring the allowlist.
+      const state: InternalState =
         v === 'on'
-          ? chalk.green('\n  ✓ Strict tier on — loopback and private ranges are blocked.\n')
-          : chalk.yellow('\n  ✓ Strict tier off — loopback and private ranges are reachable.\n')
-      );
+          ? 'blocked'
+          : getConfig().policy.egress.allowPrivate === false
+            ? 'listed'
+            : 'allowed';
+      console.log(chalk.gray(`\n  (\`egress strict ${v}\` is now \`egress internal ${state}\`)`));
+      setInternal(state);
     });
 
   egress
     .command('exempt <address>')
-    .description('Let ONE address through the floor (exact address, not a range)')
+    .description('Let an address or a CIDR range through the floor (e.g. 100.64.0.0/10)')
     .action((address: string) => {
       const a = normalizeEgressHost(address);
       // An exemption is compared against a NORMALIZED IP LITERAL, so only an
-      // address can ever match: an FQDN entry is written dead. The first
-      // version accepted one and printed a note, which also put this command
-      // at odds with the dashboard editor, where it is refused.
-      if (!normalizeIpLiteral(a)) {
+      // address or a range of them can ever match: an FQDN entry is written
+      // dead. The first version accepted one and printed a note, which also
+      // put this command at odds with the dashboard editor, where it is
+      // refused. The range form was added with B2 so an operator can exempt
+      // the mesh-VPN range they use instead of listing peers one at a time.
+      const slash = a.indexOf('/');
+      const base = slash === -1 ? a : a.slice(0, slash);
+      const prefixText = slash === -1 ? null : a.slice(slash + 1);
+      if (!normalizeIpLiteral(base) || (prefixText !== null && !/^\d{1,3}$/.test(prefixText))) {
         console.error(
-          chalk.red(`\n  ✗ "${address}" is not an address.`) +
+          chalk.red(`\n  ✗ "${address}" is not an address or a range.`) +
             chalk.gray(
-              '\n    Exemptions are matched as one exact address, not a name or a range.\n'
+              '\n    Exemptions are matched as an address (10.0.0.5) or a CIDR\n' +
+                '    range (100.64.0.0/10), never a name.\n'
+            )
+        );
+        process.exitCode = 1;
+        return;
+      }
+      // Refused at the keystroke, for the same reason a bare protected address
+      // is: an entry that can never release anything would be listed as in
+      // force on every machine and do nothing. A range is judged by its base,
+      // the same rule sanitizeSsrfAllow applies at load.
+      const m = classifySsrf(base);
+      if (m && !m.overridable) {
+        console.error(
+          chalk.red(`\n  ✗ ${a} cannot be exempted.`) +
+            chalk.gray(
+              `\n    ${slash === -1 ? 'That address is' : 'That range covers only'} protected ` +
+                `addresses (${m.tier}), which no setting releases.\n`
             )
         );
         process.exitCode = 1;
         return;
       }
       if (!exempt(a)) return;
-      const m = classifySsrf(a);
       console.log(chalk.green(`\n  ✓ ${a} is exempt from the floor.`));
       if (!m)
         console.log(

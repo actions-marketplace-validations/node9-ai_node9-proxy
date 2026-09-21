@@ -189,15 +189,18 @@ describe('node9 egress (integration)', () => {
     );
   });
 
-  it('S2 status reports the strict tier as OFF by default', () => {
+  it('S2 status reports internal addresses as ALLOWED by default', () => {
     const r = run([]);
-    expect(r.stdout).toMatch(/Internal addresses:\s+off/i);
+    // B1 renamed this label from the boolean on/off to the resolved state
+    // (allowed | allowlist only | blocked), because on/off named one of the
+    // two fields and left the other unreadable.
+    expect(r.stdout).toMatch(/Internal addresses:\s+allowed/i);
   });
 
-  it('S3 status reports the strict tier as ON once it is set', () => {
+  it('S3 status reports internal addresses as BLOCKED once the tier is set', () => {
     run(['strict', 'on']);
     const r = run([]);
-    expect(r.stdout).toMatch(/Internal addresses:\s+on/i);
+    expect(r.stdout).toMatch(/Internal addresses:\s+blocked/i);
   });
 
   it('S4 strict on/off round-trips through the config file', () => {
@@ -292,7 +295,7 @@ describe('node9 egress (integration)', () => {
     const r = run([]);
     expect(r.error).toBeUndefined();
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/Internal addresses:\s+on/i);
+    expect(r.stdout).toMatch(/Internal addresses:\s+blocked/i);
     expect(r.stdout).toMatch(/set by:\s+workspace/i);
   });
 
@@ -359,7 +362,7 @@ describe('node9 egress (integration)', () => {
     expect(r.stdout + r.stderr, 'says the workspace still governs').toMatch(
       /workspace|not in effect|still on/i
     );
-    expect(run([]).stdout).toMatch(/Internal addresses:\s+on/i);
+    expect(run([]).stdout).toMatch(/Internal addresses:\s+blocked/i);
   });
 
   it('refuses to overwrite a malformed config (exit 1, file untouched)', () => {
@@ -372,5 +375,131 @@ describe('node9 egress (integration)', () => {
     expect(r.stderr).toMatch(/not valid JSON/i);
     // The user's (broken) config must be left exactly as-is, not clobbered.
     expect(fs.readFileSync(cfgPath, 'utf8')).toBe(broken);
+  });
+
+  // ── B1: `egress internal`, the verb `allowPrivate` never had ─────────────
+  // Measured 2026-09-21: of the five egress settings, allowPrivate was the
+  // only one with no CLI at all. The cloud could set it (ManagedEgress has
+  // the field, lockable as egressAllowPrivate) and the dashboard had a
+  // control, so the ONLY user who could not reach it was the unconnected
+  // one, who has nothing else. The panel's Internal addresses control has
+  // three states and its middle one is exactly allowPrivate:false.
+  //
+  // The two booleans are one axis in sequence (the floor answers first, the
+  // policy second), so one verb writes both and the state reads back as a
+  // bijection.
+
+  const readState = () => {
+    const e = readEgress();
+    return { ssrfStrict: e.ssrfStrict, allowPrivate: e.allowPrivate };
+  };
+
+  it('B1-1 `internal allowed` is the default state, written explicitly', () => {
+    run(['watch']);
+    const r = run(['internal', 'allowed']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readState()).toEqual({ ssrfStrict: false, allowPrivate: true });
+  });
+
+  it('B1-2 `internal listed` requires internal addresses to be allowlisted', () => {
+    run(['watch']);
+    const r = run(['internal', 'listed']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readState()).toEqual({ ssrfStrict: false, allowPrivate: false });
+  });
+
+  it('B1-3 `internal blocked` turns the strict tier on', () => {
+    run(['watch']);
+    const r = run(['internal', 'blocked']);
+    expect(r.status, r.stderr).toBe(0);
+    // Both fields are always written: a stored value that contradicts the
+    // displayed state is how the next reader gets it wrong.
+    expect(readState()).toEqual({ ssrfStrict: true, allowPrivate: false });
+  });
+
+  it('B1-4 the three states round-trip, in any order', () => {
+    run(['watch']);
+    for (const s of ['blocked', 'allowed', 'listed', 'allowed', 'blocked'] as const) {
+      expect(run(['internal', s]).status, s).toBe(0);
+      const st = readState();
+      const back = st.ssrfStrict ? 'blocked' : st.allowPrivate ? 'allowed' : 'listed';
+      expect(back, `wrote ${s}, read back ${back}`).toBe(s);
+    }
+  });
+
+  it('B1-5 status names the resolved state, not two booleans', () => {
+    run(['watch']);
+    run(['internal', 'listed']);
+    const out = run([]).stdout;
+    expect(out, 'the state has a name a user can repeat back').toMatch(
+      /Internal addresses:\s+(allowlist only|listed)/i
+    );
+  });
+
+  it('B1-6 a bad verb exits 1 and names the three it accepts', () => {
+    const r = run(['internal', 'sometimes']);
+    expect(r.status).toBe(1);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/allowed/i);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/blocked/i);
+  });
+
+  it('B1-7 `strict on|off` still works and delegates to the same writer', () => {
+    // It is documented, in use, and named in the posture row's remediation
+    // line, so removing it breaks a published instruction. It stays as an
+    // alias over one writer rather than a second way to set the field.
+    run(['watch']);
+    run(['strict', 'on']);
+    expect(readState().ssrfStrict).toBe(true);
+    run(['strict', 'off']);
+    expect(readState().ssrfStrict).toBe(false);
+  });
+
+  it('B1-8 `strict off` does not silently widen past what the user had', () => {
+    // From `listed` (allowPrivate false), `strict off` must land on `listed`,
+    // not on `allowed`: turning a tier off is not consent to stop requiring
+    // the allowlist.
+    run(['watch']);
+    run(['internal', 'listed']);
+    run(['strict', 'on']);
+    run(['strict', 'off']);
+    expect(readState()).toEqual({ ssrfStrict: false, allowPrivate: false });
+  });
+
+  // ── B2: an exemption may name a RANGE ────────────────────────────────────
+  // The engine rows are in packages/policy-engine/src/egress/exempt-range.spec.ts;
+  // these two are the surfaces a user actually touches.
+
+  it('B2-1 `exempt` accepts a CIDR range and lists it', () => {
+    run(['watch']);
+    const r = run(['exempt', '100.64.0.0/10']);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readEgress().ssrfAllow).toContain('100.64.0.0/10');
+    expect(run([]).stdout).toMatch(/100\.64\.0\.0\/10/);
+  });
+
+  it('B2-2 `exempt` still refuses a range that can never release anything', () => {
+    // 169.254.0.0/16 is entirely link-local, which no setting releases, so the
+    // entry would be listed as in force and do nothing. Same rule as the
+    // single protected address at the keystroke (S7).
+    const r = run(['exempt', '169.254.0.0/16']);
+    expect(r.status).toBe(1);
+    expect(`${r.stdout}${r.stderr}`).toMatch(/cannot be exempted|protected/i);
+  });
+
+  it('B2-3 a protected RANGE already in the file is dropped from the effective list', () => {
+    // The sanitize path, for ranges: same guarantee S7b makes for a bare
+    // address. A dead entry advertised as in force is the failure.
+    const cfgPath = path.join(home, '.node9', 'config.json');
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        policy: { egress: { ssrfAllow: ['169.254.0.0/16', '224.0.0.0/4', '100.64.0.0/10'] } },
+      })
+    );
+    const out = run([]).stdout;
+    expect(out, 'the usable range survives').toMatch(/100\.64\.0\.0\/10/);
+    expect(out, 'link-local is dropped').not.toMatch(/169\.254\.0\.0/);
+    expect(out, 'multicast is dropped').not.toMatch(/224\.0\.0\.0/);
   });
 });

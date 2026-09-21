@@ -189,6 +189,7 @@ export {
   ssrfFloor,
   isStrictGatedTier,
   ssrfReason,
+  ssrfExemptMatches,
   SSRF_MAX_HOST,
 } from './egress/ssrf';
 export {
