@@ -64,6 +64,20 @@ function exempt(address: string): boolean {
  * and `node9 pause` lifts the floor along with everything else. A status
  * screen that overstates protection is worse than none.
  *
+ * Corrected again 2026-09-21, and this time the text was UNDERstating. Two of
+ * those three claims stopped being true the same day they were written:
+ *   - `438cd16` (the same date) taught the floor to read a declared URL, so
+ *     WebFetch and the MCP fetch tools DO pass it. Measured: WebFetch to the
+ *     metadata endpoint is denied.
+ *   - CGNAT is NOT in the always-blocked set. It is `hit('cgnat', true)`,
+ *     i.e. overridable, and it sits in STRICT_TIERS, i.e. reachable until
+ *     `ssrfStrict` is on. Measured: `curl http://100.64.0.5/` is allowed on a
+ *     default install, and an exemption releases it.
+ * The same two errors were live on four surfaces at once (this one, the MCP
+ * tool, the posture row, the dashboard caption), because the fix that made
+ * them wrong never came back to the text. A claim that lives in four places
+ * needs one wording; this is it, and the other three quote it.
+ *
  * The exemption list printed is the EFFECTIVE one (getConfig has already
  * dropped an entry that names a protected address), so a user who typed one
  * sees that it is not in force.
@@ -72,10 +86,12 @@ function showFloor(
   e: Config['policy']['egress'],
   ssrfStrictSource: Config['ssrfStrictSource']
 ): void {
-  console.log(chalk.gray('\n  Protected addresses') + chalk.gray(' — in shell commands only'));
+  console.log(
+    chalk.gray('\n  Protected addresses') + chalk.gray(' — in shell commands and declared URLs')
+  );
   console.log(
     chalk.gray(
-      '    always blocked: cloud metadata, link-local, multicast, CGNAT (100.64/10)\n' +
+      '    always blocked: cloud metadata, link-local, multicast\n' +
         '    no setting releases these, though `node9 pause` suspends all enforcement'
     )
   );
@@ -90,8 +106,8 @@ function showFloor(
     `    Internal addresses:  ${strict ? chalk.green('on') : chalk.yellow('off')}` +
       chalk.gray(
         strict
-          ? '  loopback and 10/172.16/192.168 are blocked too'
-          : '  loopback and 10/172.16/192.168 are reachable'
+          ? '  loopback, 10/172.16/192.168 and CGNAT are blocked too'
+          : '  loopback, 10/172.16/192.168 and CGNAT are reachable'
       )
   );
   console.log(chalk.gray(`    set by: ${by}`));
@@ -99,8 +115,12 @@ function showFloor(
   console.log(chalk.gray(`    Exemptions: ${exemptions.length ? exemptions.join(', ') : 'none'}`));
   console.log(
     chalk.gray(
-      '    Not covered: an agent tool that fetches a URL itself (WebFetch, an MCP\n' +
-        '    fetch tool) does not pass this gate.'
+      '    Covered: shell commands, and tools that declare a URL (WebFetch, an MCP\n' +
+        '    fetch tool, browser navigate).\n' +
+        '    Not covered: an interpreter one-liner (node -e, python3 -c) hides its\n' +
+        '    destination inside a program and does not reach this gate.\n' +
+        '    CGNAT (100.64/10) is NOT in the always-blocked set: it is reachable\n' +
+        '    until Internal addresses is on, and an exemption can release it.'
     )
   );
 }

@@ -126,10 +126,10 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
   // "ssrf floor is blocking Strict tier off: loopback…".
   const detail = [
     'the cloud instance-metadata endpoint',
-    'link-local, multicast, unspecified and CGNAT (100.64/10) addresses',
+    'link-local and multicast addresses',
     egress.ssrfStrict
-      ? 'the strict tier is on: loopback and the private ranges are blocked too'
-      : `the strict tier is off: loopback and the private ranges stay reachable (${
+      ? 'the strict tier is on: loopback, the private ranges and CGNAT are blocked too'
+      : `the strict tier is off: loopback, the private ranges and CGNAT (100.64/10) stay reachable (${
           egress.policySource === 'workspace'
             ? 'turn it on in the dashboard, Enforcement → Network'
             : '`node9 egress strict on`'
@@ -140,16 +140,16 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
   }
   // Named as a limit, not buried: a reader who takes this row as machine-wide
   // protection is the failure this row exists to avoid.
-  detail.push('not covered: WebFetch and MCP fetch tools reach a URL without this gate');
+  detail.push('not covered: an interpreter one-liner (node -e, python3 -c) hides its destination');
   return [
     {
       category: 'Egress',
       severity: 'advisory',
-      title: 'The cloud metadata endpoint is blocked in shell commands',
+      title: 'The cloud metadata endpoint is blocked',
       what:
         'node9 blocks it before any egress policy is consulted, and no setting releases it. ' +
-        'It sees shell commands (curl, wget, ssh); a tool that fetches a URL itself does not ' +
-        'pass this gate.',
+        'It sees shell commands (curl, wget, ssh) and tools that declare a URL (WebFetch, ' +
+        'an MCP fetch tool, browser navigate); an interpreter one-liner does not reach it.',
       why: "One request to that address returns this machine's cloud credentials, to anyone who can make the agent send it.",
       who: 'An agent talked into fetching that address hands over the keys and cannot, here.',
       owner: 'node9',

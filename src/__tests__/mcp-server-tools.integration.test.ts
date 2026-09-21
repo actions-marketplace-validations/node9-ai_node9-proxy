@@ -259,11 +259,22 @@ describe('node9 MCP server — egress control tools', () => {
     );
     const text = res[1]?.result?.content?.[0]?.text ?? '';
     expect(text, 'the always-on tier').toMatch(/metadata/i);
-    // An agent reads this answer as ground truth, so the three limits matter
-    // more here than anywhere: shell-only, CGNAT, and pause.
-    expect(text, 'shell-only, not machine-wide').toMatch(/shell command/i);
-    expect(text, 'the tools that bypass it').toMatch(/WebFetch|fetch tool/i);
-    expect(text, 'CGNAT is blocked by default').toMatch(/100\.64|CGNAT/i);
+    // An agent reads this answer as ground truth, so the limits matter more
+    // here than anywhere. These rows assert the CLAIM, not the presence of a
+    // word: the previous /WebFetch|fetch tool/ matched "does not pass this
+    // gate" and its correction equally, so the text inverted while the test
+    // stayed green for two weeks.
+    expect(text, 'shell is covered').toMatch(/shell command/i);
+    expect(text, 'a declared URL is covered too').toMatch(/declare a URL|WebFetch/i);
+    expect(text, 'must not tell an agent a declared URL bypasses the floor').not.toMatch(
+      /(WebFetch|fetch tool)[^.]*\b(not pass|bypass|unchecked|never reach)/i
+    );
+    expect(text, 'the real gap is the interpreter one-liner').toMatch(
+      /node -e|python3 -c|interpreter/i
+    );
+    expect(text, 'CGNAT is named, as reachable-by-default not always-blocked').toMatch(
+      /100\.64|CGNAT/i
+    );
     expect(text, 'pause suspends it').toMatch(/pause/i);
     expect(text, 'the strict tier and its state').toMatch(/internal addresses:\s*on/i);
     expect(text, 'the exemptions in force').toContain('100.64.0.1');

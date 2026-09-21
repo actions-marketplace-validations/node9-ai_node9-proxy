@@ -354,9 +354,9 @@ export const TOOLS = [
       'Show egress (outbound network) control: whether it is enabled, the mode ' +
       '(off / review / block), and your allow + deny host lists. Common dev/LLM hosts ' +
       '(github, npm, pypi, anthropic, …) are always allowed by a built-in list. ' +
-      'Also reports the SSRF floor: the addresses blocked in SHELL COMMANDS before ' +
-      'any policy is consulted (cloud metadata, link-local, multicast, CGNAT), which ' +
-      'tools bypass it, whether the strict tier (loopback + private ranges) is on, and ' +
+      'Also reports the SSRF floor: the addresses blocked before any policy is ' +
+      'consulted (cloud metadata, link-local, multicast), the carriers it covers, ' +
+      'whether the strict tier (loopback, private ranges, CGNAT) is on, and ' +
       'the exemptions in force. ' +
       'Read-only.',
     inputSchema: { type: 'object', properties: {}, required: [] },
@@ -569,14 +569,18 @@ function handleEgressStatus(): string {
     // The SSRF floor. Without these lines an agent reading this answer
     // concludes that internal addresses are reachable, because nothing said
     // otherwise. The LIMITS are here for the same reason and matter more on
-    // this surface than on any other: an agent treats this as ground truth,
-    // and the first version told it the floor was absolute. It is not. It sees
-    // shell commands only, and `node9 pause` suspends it.
-    'Protected addresses, IN SHELL COMMANDS ONLY: cloud metadata, link-local, multicast ' +
-      'and CGNAT (100.64/10) are blocked before any of the above is consulted. No setting ' +
-      'releases them, though `node9 pause` suspends all enforcement.',
-    'NOT covered by that: a tool that fetches a URL itself (WebFetch, an MCP fetch tool) ' +
-      'does not pass this gate at all.',
+    // this surface than on any other: an agent treats this as ground truth.
+    // The first version said the floor was absolute; the correction said it
+    // was shell-only; both were wrong by the time they were read. What it
+    // actually covers is measured in egress.integration.test.ts.
+    'Protected addresses: cloud metadata, link-local and multicast are blocked before ' +
+      'any of the above is consulted, in shell commands AND in tools that declare a URL ' +
+      '(WebFetch, an MCP fetch tool, browser navigate). No setting releases them, though ' +
+      '`node9 pause` suspends all enforcement.',
+    'NOT covered by that: an interpreter one-liner (node -e, python3 -c) carries its ' +
+      'destination inside a program and does not reach this gate. CGNAT (100.64/10) is ' +
+      'NOT in the always-blocked set — it is reachable until the strict tier is on, and ' +
+      'an exemption can release it.',
     `Internal addresses: ${e.ssrfStrict ? 'on' : 'off'} — loopback and the private ranges ` +
       `are ${e.ssrfStrict ? 'blocked too' : 'reachable'}.`,
     `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,

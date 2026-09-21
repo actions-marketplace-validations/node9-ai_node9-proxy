@@ -144,19 +144,36 @@ describe('node9 egress (integration)', () => {
     expect(named.stdout).toBe(bare.stdout);
   });
 
-  // ── Truthfulness of the floor block (code review, 2026-09-08) ────────────
-  // Three claims were wrong: the floor is SHELL-ONLY (WebFetch and MCP fetch
-  // tools reach the address unchecked), CGNAT is blocked by default and was
-  // named nowhere, and `node9 pause` lifts the whole thing.
+  // ── Truthfulness of the floor block ─────────────────────────────────────
+  // 2026-09-08: three overclaims were removed (machine-wide, CGNAT unnamed,
+  // pause). 2026-09-21: two of the replacements were themselves wrong, and
+  // the reason they survived is that these rows asserted a WORD, not a claim:
+  // /WebFetch|fetch tool/ matched both "does not pass this gate" and its
+  // opposite, so the text could invert with the test still green. Each row
+  // below now pins the sentence, and the measured verdict it describes is in
+  // ssrf-pins.spec.ts (WebFetch to the metadata endpoint is denied) and
+  // egress-carriers.integration.test.ts.
 
-  it('T1 the block says it covers shell commands, not the whole machine', () => {
+  it('T1 the block names the carriers it covers, and the one it does not', () => {
     const out = run([]).stdout;
-    expect(out, 'the surface it actually covers').toMatch(/shell command/i);
-    expect(out, 'the surface it does NOT cover').toMatch(/WebFetch|fetch tool/i);
+    expect(out, 'shell is covered').toMatch(/shell command/i);
+    expect(out, 'a declared URL is covered too, since 438cd16').toMatch(/declared URL|WebFetch/i);
+    expect(out, 'it must NOT claim a declared URL bypasses the floor').not.toMatch(
+      /(WebFetch|fetch tool)[^.]*\b(not pass|bypass|unchecked|never reach)/i
+    );
+    expect(out, 'the real gap is the interpreter one-liner').toMatch(
+      /node -e|python3 -c|interpreter/i
+    );
   });
 
-  it('T2 CGNAT is named in the always-blocked set', () => {
-    expect(run([]).stdout).toMatch(/100\.64|carrier-grade|CGNAT/i);
+  it('T2 CGNAT is named as reachable-by-default, NOT as always blocked', () => {
+    const out = run([]).stdout;
+    expect(out, 'CGNAT is named somewhere').toMatch(/100\.64|CGNAT/i);
+    // Measured on a default install: `curl http://100.64.0.5/` is ALLOWED,
+    // and an exemption releases it. It is in STRICT_TIERS and overridable.
+    expect(out, 'the always-blocked list must not contain CGNAT').not.toMatch(
+      /always blocked:[^\n]*(100\.64|CGNAT)/i
+    );
   });
 
   it('T3 the "no setting releases these" claim carries the pause caveat', () => {
