@@ -25,6 +25,7 @@
 //    32-bit hashes fold to protected addresses, and none of them is ever a URL
 //    hostname.
 import { classifySsrf, isStrictGatedTier, ssrfReason, type SsrfMatch } from './ssrf';
+import type { Destination } from './index';
 
 /**
  * Tools whose named argument really is a destination the agent is about to
@@ -89,6 +90,41 @@ function hostOf(value: string): string | null {
     return h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The hosts a non-shell tool call will reach, in the SAME shape the shell
+ * extractor produces, so both feed one evaluateEgress (G10).
+ *
+ * Measured 2026-09-20 on dev e748b4a, egress { mode: 'block', allow: [] }:
+ * `curl https://evil.example.com/` denied, the same URL through WebFetch, MCP
+ * fetch and browser navigate allowed. The allowlist was shell-only, and an
+ * agent that wants to exfiltrate does not need curl. The extraction below is
+ * what the floor above already does; the policy was never applied to it.
+ *
+ * Same closed table, same helpers, for the same reason: a tool is covered
+ * because it is LISTED, never because an argument looked like a URL. A tool
+ * not in DESTINATION_ARGS yields [] and is invisible to the egress policy,
+ * exactly as it is invisible to the floor. `binary` carries the tool name so
+ * the reason string and the audit row say which carrier it was.
+ *
+ * Never throws: this runs on the hook path for every tool call.
+ */
+export function extractToolDestinations(toolName: string, args: unknown): Destination[] {
+  try {
+    const paths = DESTINATION_ARGS.get(bareToolName(toolName));
+    if (!paths) return [];
+    const out: Destination[] = [];
+    for (const path of paths) {
+      for (const value of valuesAt(args, path)) {
+        const host = hostOf(value);
+        if (host) out.push({ host, binary: toolName, raw: value });
+      }
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 

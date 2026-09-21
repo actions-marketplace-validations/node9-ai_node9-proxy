@@ -6,7 +6,11 @@ import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
 import { ssrfDestinationFloor, NET_BINARIES } from '@node9/policy-engine';
-import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
+import {
+  extractShellDestinations,
+  extractToolDestinations,
+  evaluateEgress,
+} from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
@@ -701,8 +705,29 @@ async function _authorizeHeadlessCore(
     }
   }
 
+  // ── G10: a tool on the ignored list that DECLARES a destination ──────────
+  // WebFetch is on ignoredTools, so with the guards below it never reached
+  // evaluatePolicy and the egress policy was shell-only (measured 2026-09-20:
+  // curl denied, WebFetch to the same host allowed, under mode:block). When
+  // egress is on and the call carries a declared destination (the closed list
+  // in egress/destinations.ts, the same one the floor above reads), it is
+  // handed to the engine, whose egress verdict is computed BEFORE its ignored
+  // fast path and returned there. The ENGINE builds the verdict, so
+  // `node9 explain` and this gate cannot disagree.
+  //
+  // NOT skipIgnoredFastPath. The jail guard needs that door because its rules
+  // live after the fast path; egress does not, and passing it opened the whole
+  // engine tail to an ignored tool: measured on a strict-mode machine, every
+  // ALLOWLISTED WebFetch became a review ("Global Config (Strict Mode
+  // Active)") while explain, which passes no flag, still said ALLOW. That is
+  // the G8 explain/gate gap, reintroduced by the fix that was meant to close
+  // it. The engine's own fast path returns the egress verdict or allow.
+  const declaredEgress =
+    config.policy.egress?.enabled === true && extractToolDestinations(toolName, args).length > 0;
+  const judge = !isIgnoredTool(toolName) || declaredEgress;
+
   if (isObserveMode) {
-    if (!isIgnoredTool(toolName)) {
+    if (judge) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       const wouldBlock = policyResult.decision === 'block';
       if (!isManual)
@@ -728,7 +753,7 @@ async function _authorizeHeadlessCore(
   }
 
   if (config.settings.mode === 'audit') {
-    if (!isIgnoredTool(toolName)) {
+    if (judge) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       if (policyResult.decision === 'review') {
         // Local row only — the outbox shipper delivers it to the SaaS.
@@ -804,15 +829,21 @@ async function _authorizeHeadlessCore(
   // NOTE: appPermReview does NOT skip this block (fix #3) — the policy must run so
   // a hard-block verdict still wins. The ALLOW-returns inside are individually
   // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
-  if (!taintWarning && !isIgnoredTool(toolName)) {
+  if (!taintWarning && judge) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
     // Skipped for an org-set review (re-review regression fix): reopening this
     // block for fix #3 re-enabled loop detection, which would hard-deny a
     // review-marked tool BEFORE its approval card ever shows (an agent retrying
     // after a human deny trips the threshold). A review must always reach the
     // human; the human's own deny is the throttle.
+    // G10: and skipped for a tool admitted by `judge` alone. An ignored tool
+    // never reached this counter before; arming it because egress is ON turned
+    // an agent re-fetching the same page into a hard "Loop Detected" deny
+    // (measured: six identical WebFetch calls to an ALLOWLISTED host went
+    // allow, allow, allow, allow, deny, deny). Egress judges the destination,
+    // not the repetition.
     const ld = config.policy.loopDetection;
-    if (ld.enabled && !appPermReview) {
+    if (ld.enabled && !appPermReview && !isIgnoredTool(toolName)) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
