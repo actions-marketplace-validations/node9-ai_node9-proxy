@@ -144,10 +144,14 @@ export interface Config {
       enabled: boolean;
       scanIgnoredTools: boolean;
       // Realtime PII gating for high-signal PII (SSN, Credit Card) in tool args.
-      // 'off' (default): detect-only via the offline scan, never blocks.
-      // 'block': deny the tool call in realtime when SSN/Credit Card appears.
-      // Opt-in by design — defaulting to 'off' changes no existing behaviour and
-      // avoids false-positive blocks for orgs that legitimately handle PII.
+      // 'block' (default): deny the tool call in realtime when SSN/Credit Card
+      // appears.
+      // 'off': the detector NEVER RUNS. The gate reads `dlp.pii === 'block'`
+      // before calling detectArgsPii (auth/orchestrator.ts), so 'off' is not
+      // "detect without blocking": nothing is detected at all.
+      // Default flipped to 'block' 2026-09-22: shipping the PII detector
+      // switched off protects nobody. An org that legitimately handles PII
+      // sets 'off' from the dashboard, which wins outright on a keyed machine.
       pii?: 'off' | 'block';
       // What a REVIEW-severity DLP match does (review-ask-inline-v2-spec.md):
       // 'review' (default): flag for human review (v2: inline ask by default).
@@ -449,7 +453,7 @@ export const DEFAULT_CONFIG: Config = {
           'The AI wants to download a script from the internet and run it immediately, without you seeing what it contains. This is one of the most common ways malware gets installed.',
       },
     ],
-    dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
+    dlp: { enabled: true, scanIgnoredTools: true, pii: 'block' },
     egress: {
       enabled: false,
       mode: 'review',

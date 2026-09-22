@@ -10,6 +10,7 @@ import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT, DAEMON_HOST } from '..
 import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
+import { assessCodexTrust, codexTrustInstruction } from '../../codex-trust';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
 import {
   isDaemonServiceInstalled,
@@ -177,7 +178,39 @@ export function registerDoctorCommand(program: Command, version: string): void {
       const notConfigured: string[] = [];
       for (const a of getAgentWiring(homeDir)) {
         const anyHookWired = a.hooks.some((h) => h.wired);
-        if (a.isProtected) {
+        if (a.isProtected && a.id === 'codex' && anyHookWired) {
+          // A wired hook is not a running hook. Codex runs a hook only after
+          // the user trusts it, trust is keyed to the file's content, and node9
+          // rewrites that file on every init/add/self-heal. So "hook active"
+          // used to be printed on machines where Codex was skipping every hook
+          // — dogfound 2026-09-22 across two Windows boxes. Report what can be
+          // observed, and never a tick for what cannot (codex-trust.ts).
+          const t = assessCodexTrust(homeDir);
+          const wrote = t.hooksWrittenAt ? agoLabel(t.hooksWrittenAt) : 'unknown';
+          if (t.state === 'observed') {
+            pass(
+              `${a.label} — ${a.hookLabel} active and trusted (Codex activity seen ${agoLabel(
+                t.lastCodexActivityAt as string
+              )}, after the hooks were written)`
+            );
+          } else if (t.state === 'disabled') {
+            fail(
+              `${a.label} — hooks wired but DISABLED ([features].hooks = false in ~/.codex/config.toml)`,
+              'Re-enable hooks in config.toml; until then only MCP proxy wrapping is active'
+            );
+          } else if (t.state === 'never-trusted') {
+            fail(
+              `${a.label} — hooks wired but Codex has never trusted them (no [hooks.state] in config.toml)`,
+              codexTrustInstruction().trim()
+            );
+          } else {
+            warn(
+              `${a.label} — hooks written ${wrote}; no Codex activity has reached node9 since`,
+              'Stale trust and "Codex not used since" look identical from here. If Codex has run since then, the hooks are NOT trusted:\n' +
+                codexTrustInstruction()
+            );
+          }
+        } else if (a.isProtected) {
           // Protected via hooks OR an MCP proxy entry — name which so an
           // MCP-only agent (Cursor) reads correctly instead of "not configured".
           pass(`${a.label} — ${anyHookWired ? `${a.hookLabel} active` : 'MCP proxy active'}`);

@@ -5,6 +5,7 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import { codexTrustInstruction } from './codex-trust';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { recordHookBaseline } from './daemon/hook-baseline';
@@ -323,6 +324,50 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
+// ── MCP wrap vocabulary ───────────────────────────────────────────────────────
+
+// The subcommand that actually accepts `--upstream`. `node9 mcp` is a PARENT
+// command (gateway | ungateway | status | pin) and has no such option, so a
+// wrap written as `node9 mcp --upstream <cmd>` dies on startup with
+// `error: unknown option '--upstream'`. Every agent's wrap carried that form.
+//
+// The damage is worse than lost governance: node9 REPLACES the user's server
+// command, so the wrap also broke the very server it was meant to protect.
+// Found 2026-09-22 in Codex's own log, not in ours — node9 had no idea the
+// server it wrapped was failing to start.
+export const MCP_WRAP_SUBCOMMAND = 'mcp-gateway';
+const LEGACY_MCP_WRAP_SUBCOMMAND = 'mcp';
+
+export function mcpWrapArgs(upstream: string): string[] {
+  return [MCP_WRAP_SUBCOMMAND, '--upstream', upstream];
+}
+
+// Recognises the legacy subcommand too. An install still carrying it must read
+// back as OURS — otherwise teardown stops unwrapping it and the user is left
+// with a dead server and no way to undo it.
+export function isMcpWrapSubcommand(arg: unknown): boolean {
+  return arg === MCP_WRAP_SUBCOMMAND || arg === LEGACY_MCP_WRAP_SUBCOMMAND;
+}
+
+// Rewrites, in place, any node9 wrap still using the invalid subcommand, and
+// returns the repaired server names. The wrap loops skip anything already
+// commanded by `node9`, so without this a broken wrap survives every upgrade
+// untouched — the same trap the hook self-heal had to solve for #185.
+export function repairLegacyMcpWraps(
+  servers: Record<string, { command?: string; args?: unknown } | undefined>
+): string[] {
+  const repaired: string[] = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server || server.command !== 'node9') continue;
+    const args = server.args as unknown[] | undefined;
+    if (!Array.isArray(args)) continue;
+    if (args[0] !== LEGACY_MCP_WRAP_SUBCOMMAND || args[1] !== '--upstream') continue;
+    servers[name] = { ...server, args: [MCP_WRAP_SUBCOMMAND, ...args.slice(1)] };
+    repaired.push(name);
+  }
+  return repaired;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Matches hook commands written by node9 in any of these forms:
@@ -391,7 +436,7 @@ export function teardownClaude(): void {
       if (
         server.command === 'node9' &&
         Array.isArray(args) &&
-        args[0] === 'mcp' &&
+        isMcpWrapSubcommand(args[0]) &&
         args[1] === '--upstream' &&
         typeof args[2] === 'string'
       ) {
@@ -448,7 +493,7 @@ export function teardownGemini(): void {
       if (
         server.command === 'node9' &&
         Array.isArray(args) &&
-        args[0] === 'mcp' &&
+        isMcpWrapSubcommand(args[0]) &&
         args[1] === '--upstream' &&
         typeof args[2] === 'string'
       ) {
@@ -494,7 +539,7 @@ export function teardownCursor(): void {
     if (
       server.command === 'node9' &&
       Array.isArray(args) &&
-      args[0] === 'mcp' &&
+      isMcpWrapSubcommand(args[0]) &&
       args[1] === '--upstream' &&
       typeof args[2] === 'string'
     ) {
@@ -625,11 +670,28 @@ export async function setupClaude(): Promise<void> {
   }
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     claudeConfig.mcpServers = servers;
     writeJson(mcpPath, claudeConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -668,7 +730,11 @@ export async function setupClaude(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -678,7 +744,7 @@ export async function setupClaude(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       claudeConfig.mcpServers = servers;
@@ -778,10 +844,29 @@ export async function setupGemini(): Promise<void> {
   }
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  // This flow defers the write to the shared `hooksChanged` branch rather than
+  // writing here, which is why it sets the flag instead of calling write.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     settings.mcpServers = servers;
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     hooksChanged = true;
     anythingChanged = true;
   }
@@ -803,7 +888,11 @@ export async function setupGemini(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${settingsPath}  (mcpServers)`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -813,7 +902,7 @@ export async function setupGemini(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       settings.mcpServers = servers;
@@ -964,11 +1053,28 @@ export async function setupAntigravity(): Promise<void> {
   }
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -1012,7 +1118,11 @@ export async function setupAntigravity(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -1022,7 +1132,7 @@ export async function setupAntigravity(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       mcpConfig.mcpServers = servers;
@@ -1100,7 +1210,7 @@ export function teardownAntigravity(): void {
       if (
         server.command === 'node9' &&
         Array.isArray(args) &&
-        args[0] === 'mcp' &&
+        isMcpWrapSubcommand(args[0]) &&
         args[1] === '--upstream' &&
         typeof args[2] === 'string'
       ) {
@@ -1211,11 +1321,28 @@ export async function setupCopilot(): Promise<void> {
   }
 
   // Add the node9 MCP server entry if not already present (pure addition).
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -1230,7 +1357,11 @@ export async function setupCopilot(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -1240,7 +1371,7 @@ export async function setupCopilot(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       mcpConfig.mcpServers = servers;
@@ -1316,7 +1447,7 @@ export function teardownCopilot(): void {
       if (
         server.command === 'node9' &&
         Array.isArray(args) &&
-        args[0] === 'mcp' &&
+        isMcpWrapSubcommand(args[0]) &&
         args[1] === '--upstream' &&
         typeof args[2] === 'string'
       ) {
@@ -1508,11 +1639,28 @@ export async function setupCursor(): Promise<void> {
   // MCP proxy wrapping is the supported protection method for now.
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -1528,7 +1676,11 @@ export async function setupCursor(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -1538,7 +1690,7 @@ export async function setupCursor(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       mcpConfig.mcpServers = servers;
@@ -1739,11 +1891,28 @@ export async function setupCodex(): Promise<void> {
   const hooksInstalled = (hooksFile.hooks?.PreToolUse?.length ?? 0) > 0;
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     config.mcp_servers = servers;
     writeToml(configPath, config);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -1759,7 +1928,11 @@ export async function setupCodex(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${configPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
 
@@ -1769,7 +1942,7 @@ export async function setupCodex(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       config.mcp_servers = servers;
@@ -1803,13 +1976,11 @@ export async function setupCodex(): Promise<void> {
   // Trust reminder must surface whenever hooks are installed — both on the
   // first-run success path AND on re-runs that don't change anything,
   // because a user who never trusted hooks the first time still needs to.
+  // "/hooks" was the wrong instruction for the desktop app, which has no hook
+  // review screen at all — trust can only be granted from the Codex TUI. The
+  // text now names a real place and says what is at stake (codex-trust.ts).
   const printCodexTrustReminder = () => {
-    console.log(
-      chalk.yellow(
-        '    ➜  Open Codex and run /hooks to review and trust the Node9 entries.\n' +
-          '       Until trusted, only MCP proxy wrapping is active.'
-      )
-    );
+    console.log(chalk.yellow(codexTrustInstruction()));
   };
 
   if (!anythingChanged && serversToWrap.length === 0) {
@@ -1879,7 +2050,7 @@ export function teardownCodex(): void {
     if (
       server.command === 'node9' &&
       Array.isArray(args) &&
-      args[0] === 'mcp' &&
+      isMcpWrapSubcommand(args[0]) &&
       args[1] === '--upstream' &&
       typeof args[2] === 'string'
     ) {
@@ -1986,11 +2157,28 @@ export async function setupWindsurf(): Promise<void> {
 
   let anythingChanged = false;
 
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -2005,7 +2193,11 @@ export async function setupWindsurf(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
@@ -2014,7 +2206,7 @@ export async function setupWindsurf(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       mcpConfig.mcpServers = servers;
@@ -2073,7 +2265,7 @@ export function teardownWindsurf(): void {
     if (
       server.command === 'node9' &&
       Array.isArray(args) &&
-      args[0] === 'mcp' &&
+      isMcpWrapSubcommand(args[0]) &&
       args[1] === '--upstream' &&
       typeof args[2] === 'string'
     ) {
@@ -2135,11 +2327,31 @@ export async function setupVSCode(): Promise<void> {
 
   let anythingChanged = false;
 
-  if (!hasNode9McpServerVSCode(servers)) {
-    servers['node9'] = { type: 'stdio', command: 'node9', args: ['mcp-server'] };
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. VS Code
+  // keeps its own entry shape and its own presence check, which is why this
+  // block is spelled separately from the seven above — but the defect and the
+  // reasoning are identical: the wrap loop below skips anything already
+  // commanded by node9, so a broken wrap would survive every upgrade.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as unknown as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServerVSCode(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) {
+      servers['node9'] = { type: 'stdio', command: 'node9', args: ['mcp-server'] };
+    }
     mcpConfig.servers = servers;
     writeJson(mcpPath, mcpConfig);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -2154,7 +2366,11 @@ export async function setupVSCode(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
@@ -2164,7 +2380,7 @@ export async function setupVSCode(): Promise<void> {
           ...servers[name],
           type: 'stdio',
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       mcpConfig.servers = servers;
@@ -2221,7 +2437,7 @@ export function teardownVSCode(): void {
     if (
       server.command === 'node9' &&
       Array.isArray(args) &&
-      args[0] === 'mcp' &&
+      isMcpWrapSubcommand(args[0]) &&
       args[1] === '--upstream' &&
       typeof args[2] === 'string'
     ) {
@@ -2263,11 +2479,28 @@ export async function setupClaudeDesktop(): Promise<void> {
 
   let anythingChanged = false;
 
-  if (!hasNode9McpServer(servers)) {
-    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+  // Also repair any wrap left behind with the invalid `mcp` subcommand. The
+  // wrap loop below skips anything already commanded by node9, so without this
+  // a broken wrap survives every upgrade with the user's own server dead. Like
+  // the addition above there is nothing for the user to decide, so no prompt.
+  const repairedMcpWraps = repairLegacyMcpWraps(
+    servers as Record<string, { command?: string; args?: unknown }>
+  );
+  const addNode9McpServer = !hasNode9McpServer(servers);
+  if (addNode9McpServer || repairedMcpWraps.length > 0) {
+    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
     config.mcpServers = servers;
     writeJson(configPath, config);
-    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    if (addNode9McpServer) {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+    if (repairedMcpWraps.length > 0) {
+      console.log(
+        chalk.yellow(
+          `  🔧 repaired ${repairedMcpWraps.length} MCP wrap(s) → node9 ${MCP_WRAP_SUBCOMMAND}`
+        )
+      );
+    }
     anythingChanged = true;
   }
 
@@ -2281,7 +2514,11 @@ export async function setupClaudeDesktop(): Promise<void> {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${configPath}`));
     for (const { name, upstream } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+      console.log(
+        chalk.gray(
+          `    • ${name}: "${upstream}" → node9 ${MCP_WRAP_SUBCOMMAND} --upstream "${upstream}"`
+        )
+      );
     }
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
@@ -2290,7 +2527,7 @@ export async function setupClaudeDesktop(): Promise<void> {
         servers[name] = {
           ...servers[name],
           command: 'node9',
-          args: ['mcp', '--upstream', upstream],
+          args: mcpWrapArgs(upstream),
         };
       }
       config.mcpServers = servers;
@@ -2349,7 +2586,7 @@ export function teardownClaudeDesktop(): void {
     if (
       server.command === 'node9' &&
       Array.isArray(args) &&
-      args[0] === 'mcp' &&
+      isMcpWrapSubcommand(args[0]) &&
       args[1] === '--upstream' &&
       typeof args[2] === 'string'
     ) {
