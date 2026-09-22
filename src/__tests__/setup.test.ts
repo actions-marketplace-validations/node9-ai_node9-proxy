@@ -1685,16 +1685,24 @@ describe('setupCodex', () => {
     consoleSpy.mockRestore();
   });
 
-  it('tells the user to run /hooks in Codex to trust the entries (verified during #178)', async () => {
+  it('tells the user where Codex trust is actually granted — never "/hooks"', async () => {
     // Codex requires explicit user trust before hooks fire (per
     // tui/src/startup_hooks_review.rs: "Hooks need review ... Hooks can run
     // outside the sandbox after you trust them."). Without this instruction
     // the success line ("Node9 is now protecting Codex") overpromises.
+    //
+    // The instruction used to say "run /hooks". The desktop app has no such
+    // command and no hook review screen at all — trust can only be granted
+    // from the Codex TUI (measured 2026-09-22: the only trust write on a
+    // desktop-only machine came from client_name="codex-tui"). Desktop users
+    // were being told to do something that does not exist.
     const consoleSpy = vi.spyOn(console, 'log');
     await setupCodex();
     const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
-    expect(allOutput).toMatch(/\/hooks/);
-    expect(allOutput).toMatch(/trust/i);
+    expect(allOutput).not.toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/Trust all and continue/);
+    expect(allOutput).toMatch(/Codex must trust these hooks once/);
+    expect(allOutput).toMatch(/Every rewrite of hooks\.json needs this again/);
     consoleSpy.mockRestore();
   });
 
@@ -1724,7 +1732,8 @@ describe('setupCodex', () => {
 
     const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
     // Must reach the user even on re-run
-    expect(allOutput).toMatch(/\/hooks/);
+    expect(allOutput).not.toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/Trust all and continue/);
     expect(allOutput).toMatch(/trust/i);
     // Misleading copy must not appear when hooks are already installed
     expect(allOutput).not.toMatch(/No MCP servers found to wrap/);

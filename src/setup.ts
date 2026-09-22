@@ -5,6 +5,7 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import { codexTrustInstruction } from './codex-trust';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { recordHookBaseline } from './daemon/hook-baseline';
@@ -1975,13 +1976,11 @@ export async function setupCodex(): Promise<void> {
   // Trust reminder must surface whenever hooks are installed — both on the
   // first-run success path AND on re-runs that don't change anything,
   // because a user who never trusted hooks the first time still needs to.
+  // "/hooks" was the wrong instruction for the desktop app, which has no hook
+  // review screen at all — trust can only be granted from the Codex TUI. The
+  // text now names a real place and says what is at stake (codex-trust.ts).
   const printCodexTrustReminder = () => {
-    console.log(
-      chalk.yellow(
-        '    ➜  Open Codex and run /hooks to review and trust the Node9 entries.\n' +
-          '       Until trusted, only MCP proxy wrapping is active.'
-      )
-    );
+    console.log(chalk.yellow(codexTrustInstruction()));
   };
 
   if (!anythingChanged && serversToWrap.length === 0) {

@@ -239,3 +239,55 @@ describe('status — quoted hook form (post-#185)', () => {
     expect(stdout).toContain('✓ PostToolUse (node9 log)');
   });
 });
+
+// ── Codex trust ───────────────────────────────────────────────────────────────
+// `✓ PreToolUse (node9 check)` says the hook is in hooks.json, not that Codex
+// runs it. On 2026-09-22 this screen showed a clean ✓ on a machine where Codex
+// was skipping every hook because trust (keyed to file content) had gone stale
+// after `node9 init` rewrote the file. status now adds one honest line.
+describe('status — Codex trust line', () => {
+  const hooksJson = {
+    hooks: {
+      PreToolUse: [
+        { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check', timeout: 600 }] },
+      ],
+    },
+  };
+
+  function codexHome(configToml: string, auditRows: object[] = []): string {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-status-trust-'));
+    writeJson(path.join(home, '.codex', 'hooks.json'), hooksJson);
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), configToml);
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'audit.log'),
+      auditRows.map((r) => JSON.stringify(r)).join('\n') + (auditRows.length ? '\n' : '')
+    );
+    return home;
+  }
+
+  it('says NOT trusted when config.toml has no hooks.state', () => {
+    const home = codexHome('model = "x"\n');
+    const r = runStatus(home);
+    expect(r.stdout).toMatch(/✓ PreToolUse/); // the wiring line is still true
+    expect(r.stdout).toMatch(/NOT trusted by Codex yet/); // and no longer the whole story
+  });
+
+  it('says trusted only when a Codex audit row is newer than hooks.json', () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const home = codexHome(
+      'model = "x"\n[hooks.state."hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "sha256:aaa"\n',
+      [{ ts: future, tool: 'Bash', decision: 'allow', agent: 'Codex' }]
+    );
+    const r = runStatus(home);
+    expect(r.stdout).toMatch(/trusted — Codex activity seen/);
+  });
+
+  it('says unverified when entries exist but nothing from Codex has arrived since', () => {
+    const home = codexHome(
+      'model = "x"\n[hooks.state."hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "sha256:aaa"\n'
+    );
+    const r = runStatus(home);
+    expect(r.stdout).toMatch(/trust unverified/);
+  });
+});

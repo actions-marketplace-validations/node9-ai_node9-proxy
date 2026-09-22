@@ -9,6 +9,7 @@ import { getCredentials, getConfig, checkPause } from '../../core';
 import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT } from '../../auth/daemon';
 import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
 import { getAgentWiring } from '../../agent-wiring';
+import { assessCodexTrust } from '../../codex-trust';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
 import {
   isDaemonServiceInstalled,
@@ -211,6 +212,38 @@ export function registerStatusCommand(program: Command): void {
             a.hooks.map((h) => ({ name: h.label, present: h.wired })),
             a.mcpServers
           );
+          if (a.id === 'codex' && a.hooks.some((h) => h.wired)) {
+            // A ✓ above means the hook is in hooks.json — not that Codex runs
+            // it. Codex skips any hook the user has not trusted, trust is keyed
+            // to the file's content, and node9 rewrites that file on every
+            // init/add/self-heal. This screen showed a clean ✓ on a machine
+            // where Codex was running every command unchecked (2026-09-22).
+            // Say what is actually known; never a tick for what is not.
+            const t = assessCodexTrust(os.homedir());
+            if (t.state === 'observed') {
+              console.log(
+                chalk.green(
+                  `    trusted — Codex activity seen ${agoLabel(t.lastCodexActivityAt as string)}, after the hooks were written`
+                )
+              );
+            } else if (t.state === 'disabled') {
+              console.log(
+                chalk.red('    hooks DISABLED in ~/.codex/config.toml ([features].hooks = false)')
+              );
+            } else if (t.state === 'never-trusted') {
+              console.log(
+                chalk.red('    NOT trusted by Codex yet — hooks will not run; see `node9 doctor`')
+              );
+            } else {
+              console.log(
+                chalk.yellow(
+                  `    trust unverified — hooks written ${
+                    t.hooksWrittenAt ? agoLabel(t.hooksWrittenAt) : 'unknown'
+                  }, no Codex activity since; see \`node9 doctor\``
+                )
+              );
+            }
+          }
           console.log('');
         }
       }
