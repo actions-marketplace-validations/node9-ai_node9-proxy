@@ -23,6 +23,7 @@ import {
   isNode9Hook,
   isLegacyHookFormat,
   needsRewrite,
+  isWindowsQuoteBrokenHook,
 } from '../setup.js';
 
 // process.execPath is technically settable but not writable on all
@@ -53,18 +54,64 @@ describe('fullPathCommand', () => {
     vi.unstubAllEnvs();
   });
 
-  it('quotes + forward-slashes a Windows path with spaces (issue #185 regression)', () => {
+  it('emits an unquoted leading `node` on Windows (cmd quote-stripping)', () => {
     restoreProcess = stubProcess(
       'C:\\Program Files\\nodejs\\node.exe',
       'C:\\Users\\nadav\\AppData\\Roaming\\npm\\node_modules\\node9-ai\\node_modules\\@node9\\proxy\\dist\\cli.js'
     );
-    // Both paths quoted, all backslashes converted to forward slashes.
-    // Git Bash, cmd, and PowerShell all accept this form; the old
-    // `C:\Program Files\...` form broke Git Bash on whitespace + escape.
-    expect(fullPathCommand('check')).toBe(
-      '"C:/Program Files/nodejs/node.exe" ' +
+    // The #185 form quoted BOTH paths, which made the string start with a
+    // quote and carry four of them. cmd preserves quotes only when there
+    // are exactly two, so it stripped the outer pair and split on the space
+    // in `Program Files`, tried to exec `C:/Program`, and exited 1. Codex
+    // Desktop drops a failing hook silently: no enforcement, no audit row.
+    // Dropping the absolute node path removes the leading quote and fixes
+    // every shell form, while the still-quoted cli.js keeps #185's
+    // space-safety under Git Bash.
+    expect(fullPathCommand('check', 'win32')).toBe(
+      'node ' +
         '"C:/Users/nadav/AppData/Roaming/npm/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js" ' +
         'check'
+    );
+  });
+
+  it('falls back to the PATH-resolved name for a Windows global binary', () => {
+    // The bare-binary branch cannot be quoted (leading quote) and cannot be
+    // left bare (a space in the path would split it), so on Windows it
+    // resolves via PATH. This is the form verified end-to-end against Codex
+    // Desktop on 2026-09-22.
+    restoreProcess = stubProcess(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'C:\\Users\\nadav\\AppData\\Roaming\\npm\\node9'
+    );
+    expect(fullPathCommand('check', 'win32')).toBe('node9 check');
+  });
+
+  it('never begins a Windows hook command with a quote (the cmd invariant)', () => {
+    // One assertion standing for the whole class of regressions: whatever
+    // shape this function grows on Windows, a leading quote reintroduces
+    // the silent-failure bug for every user.
+    for (const argv1 of [
+      'C:\\Users\\Some User\\AppData\\Roaming\\npm\\node_modules\\node9-ai\\dist\\cli.js',
+      'C:\\Users\\Some User\\AppData\\Roaming\\npm\\node9',
+    ]) {
+      restoreProcess();
+      restoreProcess = stubProcess('C:\\Program Files\\nodejs\\node.exe', argv1);
+      for (const sub of ['check', 'log', 'check --agent antigravity']) {
+        expect(fullPathCommand(sub, 'win32').startsWith('"')).toBe(false);
+      }
+    }
+  });
+
+  it('leaves the POSIX form untouched (issue #185 regression)', () => {
+    // #185 quoted both paths so a $HOME with a space survives Git Bash and
+    // POSIX shells alike. Windows no longer takes this branch; POSIX still
+    // must, and has no cmd quote-stripping rule to trip over.
+    restoreProcess = stubProcess(
+      '/usr/bin/node',
+      '/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js'
+    );
+    expect(fullPathCommand('check', 'linux')).toBe(
+      '"/usr/bin/node" "/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js" check'
     );
   });
 
@@ -76,7 +123,7 @@ describe('fullPathCommand', () => {
       '/Users/Some User/.nvm/versions/node/v22.0.0/bin/node',
       '/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js'
     );
-    expect(fullPathCommand('log')).toBe(
+    expect(fullPathCommand('log', 'linux')).toBe(
       '"/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" ' +
         '"/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" ' +
         'log'
@@ -91,7 +138,7 @@ describe('fullPathCommand', () => {
       '/usr/local/bin/node', // ignored on this branch
       '/usr/local/bin/node9' // ends without .js
     );
-    expect(fullPathCommand('check')).toBe('"/usr/local/bin/node9" check');
+    expect(fullPathCommand('check', 'linux')).toBe('"/usr/local/bin/node9" check');
   });
 
   it('still emits the bare "node9 <sub>" form under NODE9_TESTING=1', () => {
@@ -237,6 +284,57 @@ describe('needsRewrite (#185 follow-up)', () => {
 
   it('returns false for a well-formed hook whose paths exist', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
-    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check')).toBe(false);
+    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check', 'linux')).toBe(false);
+  });
+});
+
+describe('isWindowsQuoteBrokenHook (cmd quote-stripping self-heal)', () => {
+  // The shape every Windows install carries after running #185-era code.
+  const BROKEN =
+    '"C:/Program Files/nodejs/node.exe" "C:/Users/u/AppData/Roaming/npm/.../cli.js" check';
+
+  it('flags the #185-era Windows form even when every path still exists', () => {
+    // This is the case the other two predicates miss, and the reason those
+    // users stayed silently unenforced across upgrades: the files are all
+    // present, and the forward-slash normalisation left no backslashes.
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    expect(isStaleHookCommand(BROKEN)).toBe(false);
+    expect(isLegacyHookFormat(BROKEN)).toBe(false);
+    expect(isWindowsQuoteBrokenHook(BROKEN, 'win32')).toBe(true);
+    expect(needsRewrite(BROKEN, 'win32')).toBe(true);
+  });
+
+  it('leaves POSIX alone — a leading quote is correct there', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    const posix = '"/usr/bin/node" "/usr/lib/node_modules/node9-ai/dist/cli.js" check';
+    expect(isWindowsQuoteBrokenHook(posix, 'linux')).toBe(false);
+    expect(needsRewrite(posix, 'linux')).toBe(false);
+    // Same string, Windows: still broken, because the rule is about cmd's
+    // parser and not about the path it happens to contain.
+    expect(isWindowsQuoteBrokenHook(posix, 'win32')).toBe(true);
+  });
+
+  it('does not flag the shapes fullPathCommand now emits on Windows', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    for (const cmd of ['node "C:/Users/u/dist/cli.js" check', 'node9 log']) {
+      expect(isWindowsQuoteBrokenHook(cmd, 'win32')).toBe(false);
+      expect(needsRewrite(cmd, 'win32')).toBe(false);
+    }
+  });
+
+  it('handles leading whitespace and empty input', () => {
+    expect(isWindowsQuoteBrokenHook('   "C:/x/node.exe" "C:/y/cli.js" check', 'win32')).toBe(true);
+    expect(isWindowsQuoteBrokenHook('', 'win32')).toBe(false);
+  });
+});
+
+describe('isNode9Hook recognises the post-fix Windows shapes', () => {
+  // Wiring pin, not a helper test. If isNode9Hook stops matching what
+  // fullPathCommand emits, setup reads a freshly wired install as "not
+  // wired" and appends duplicate hooks on every re-run.
+  it('matches the unquoted-node Windows form', () => {
+    expect(isNode9Hook('node "C:/Users/u/dist/cli.js" check')).toBe(true);
+    expect(isNode9Hook('node "C:/Users/u/dist/cli.js" log')).toBe(true);
+    expect(isNode9Hook('node9 check --agent antigravity')).toBe(true);
   });
 });
