@@ -168,14 +168,47 @@ function printInlineAskNotice(): void {
  * quoted, and backslashes normalise to forward slashes (accepted by Git
  * Bash, cmd, PowerShell, and POSIX shells alike). Quoting unconditionally
  * also protects POSIX users whose $HOME has a space.
+ *
+ * Windows follow-up (2026-09-22): the #185 form is TWO quoted paths, so the
+ * emitted string both begins with a quote and contains four of them. Per the
+ * documented `cmd /?` rules, quotes survive only when there are EXACTLY TWO;
+ * otherwise cmd strips the leading quote and the last quote, and the
+ * remainder splits on the space inside `Program Files`. cmd then tries to
+ * execute `C:/Program` and exits 1. Codex Desktop discards a failed hook
+ * silently, so every tool call ran unchecked and no audit row was written.
+ * Measured on Windows 11 across `cmd /d /c`, `cmd /d /s /c` and
+ * `powershell -Command`; `/s` escaped it only because the string does not
+ * END in a quote.
+ *
+ * The invariant that fixes it: ON WINDOWS A HOOK COMMAND MUST NEVER BEGIN
+ * WITH A QUOTE. Dropping the absolute node path is enough — `node` is put on
+ * PATH by the Node installer and by nvm-windows (a machine-level PATH entry,
+ * not a shell-init mechanism, so the restricted-shell concern above is a
+ * POSIX-only one). Keeping the cli.js path absolute and quoted preserves
+ * everything #185 bought: space-safety under Git Bash, immunity to a second
+ * node9 on PATH, and stale-path detection in isStaleHookCommand.
+ *
+ * `platform` is injectable so the Windows branches are exercised by CI, which
+ * runs on Linux.
  */
-export function fullPathCommand(subcommand: string): string {
+export function fullPathCommand(
+  subcommand: string,
+  platform: NodeJS.Platform = process.platform
+): string {
   if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
   const nodeExec = toForwardSlashes(process.execPath); // e.g. C:/Program Files/nodejs/node.exe
   const cliScript = toForwardSlashes(process.argv[1]); // dist/cli.js (dev) or .../bin/node9 (global)
+  const isWindows = platform === 'win32';
   // When installed globally or via npm link, argv[1] is the binary itself — a
-  // self-contained executable that must not be prefixed with node.
-  if (!cliScript.endsWith('.js')) return `"${cliScript}" ${subcommand}`;
+  // self-contained executable that must not be prefixed with node. On Windows
+  // it cannot be quoted (leading quote) and cannot be left bare (a space in
+  // the path would split it), so fall back to the PATH-resolved name. npm puts
+  // its global bin dir on PATH at install time; this is the form verified
+  // end-to-end against Codex Desktop on 2026-09-22.
+  if (!cliScript.endsWith('.js')) {
+    return isWindows ? `node9 ${subcommand}` : `"${cliScript}" ${subcommand}`;
+  }
+  if (isWindows) return `node "${cliScript}" ${subcommand}`;
   return `"${nodeExec}" "${cliScript}" ${subcommand}`;
 }
 
@@ -239,13 +272,38 @@ export function isLegacyHookFormat(command: string): boolean {
   return command.includes('\\');
 }
 
+// A hook command that BEGINS with a quote is broken on Windows: cmd's
+// quote-stripping rules chop it at the first space in the path (see
+// fullPathCommand). Every node9 install that ran the #185-era code on
+// Windows carries this shape, and neither of the predicates above catches
+// it — the paths still exist on disk and the forward-slash normalisation
+// left no backslashes. Without this branch those users stay silently
+// unenforced after upgrading, because self-heal never rewrites their hooks.
+// POSIX is unaffected: there a leading quote is correct and required.
+export function isWindowsQuoteBrokenHook(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!command) return false;
+  if (platform !== 'win32') return false;
+  return command.trimStart().startsWith('"');
+}
+
 // Combined predicate for the self-heal branches. A hook needs rewriting
-// either because its absolute path is gone OR because its shape is
-// from pre-#185 code. Separating the two predicates keeps each name
-// describing one thing; this wrapper exists so the 6 call sites in
-// setupClaude / setupCodex don't repeat the OR.
-export function needsRewrite(command: string): boolean {
-  return isStaleHookCommand(command) || isLegacyHookFormat(command);
+// because its absolute path is gone, because its shape is from pre-#185
+// code, or because it is the #185-era Windows form that cmd cannot run.
+// Separating the predicates keeps each name describing one thing; this
+// wrapper exists so the 6 call sites in setupClaude / setupCodex don't
+// repeat the OR.
+export function needsRewrite(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return (
+    isStaleHookCommand(command) ||
+    isLegacyHookFormat(command) ||
+    isWindowsQuoteBrokenHook(command, platform)
+  );
 }
 
 function readJson<T>(filePath: string): T | null {
