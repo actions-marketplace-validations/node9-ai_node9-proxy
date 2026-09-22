@@ -327,7 +327,11 @@ describe('setupClaude', () => {
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.github.command).toBe('node9');
     // args use the mcp --upstream gateway format
-    expect(written.mcpServers.github.args).toEqual(['mcp', '--upstream', 'npx -y server-github']);
+    expect(written.mcpServers.github.args).toEqual([
+      'mcp-gateway',
+      '--upstream',
+      'npx -y server-github',
+    ]);
   });
 
   it('skips MCP wrapping when user denies', async () => {
@@ -347,7 +351,7 @@ describe('setupClaude', () => {
   it('skips MCP servers that are already wrapped', async () => {
     withExistingFile(mcpPath, {
       mcpServers: {
-        github: { command: 'node9', args: ['mcp', '--upstream', 'npx server-github'] },
+        github: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx server-github'] },
         node9: NODE9_MCP_ENTRY,
       },
     });
@@ -564,7 +568,11 @@ describe('setupCursor', () => {
 
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.brave.command).toBe('node9');
-    expect(written.mcpServers.brave.args).toEqual(['mcp', '--upstream', 'npx server-brave']);
+    expect(written.mcpServers.brave.args).toEqual([
+      'mcp-gateway',
+      '--upstream',
+      'npx server-brave',
+    ]);
   });
 
   it('skips MCP wrapping when user denies', async () => {
@@ -634,7 +642,7 @@ describe('teardownClaude', () => {
   it('unwraps node9-wrapped MCP servers in .claude/.mcp.json', () => {
     withExistingFile(mcpPath, {
       mcpServers: {
-        myServer: { command: 'node9', args: ['mcp', '--upstream', 'npx -y some-mcp'] },
+        myServer: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx -y some-mcp'] },
         other: { command: 'python', args: ['server.py'] },
       },
     });
@@ -651,7 +659,7 @@ describe('teardownClaude', () => {
   it('unwraps MCP server with no original args (args: undefined, not [])', () => {
     withExistingFile(mcpPath, {
       mcpServers: {
-        solo: { command: 'node9', args: ['mcp', '--upstream', 'my-binary'] },
+        solo: { command: 'node9', args: ['mcp-gateway', '--upstream', 'my-binary'] },
       },
     });
 
@@ -854,7 +862,7 @@ describe('setupAntigravity', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.aws.command).toBe('node9');
-    expect(written.mcpServers.aws.args).toEqual(['mcp', '--upstream', 'npx server-aws']);
+    expect(written.mcpServers.aws.args).toEqual(['mcp-gateway', '--upstream', 'npx server-aws']);
   });
 
   it('preserves foreign hooks in hooks.json (additive, never destructive)', async () => {
@@ -963,7 +971,7 @@ describe('teardownAntigravity', () => {
       [mcpPath]: {
         mcpServers: {
           node9: NODE9_MCP_ENTRY,
-          aws: { command: 'node9', args: ['mcp', '--upstream', 'npx server-aws'] },
+          aws: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx server-aws'] },
         },
       },
     });
@@ -1503,7 +1511,7 @@ describe('teardownCursor', () => {
   it('unwraps node9-wrapped MCP servers', () => {
     withExistingFile(mcpPath, {
       mcpServers: {
-        brave: { command: 'node9', args: ['mcp', '--upstream', 'npx server-brave'] },
+        brave: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx server-brave'] },
       },
     });
 
@@ -1765,7 +1773,37 @@ describe('setupCodex', () => {
 
     const written = writtenTomlTo(configPath);
     expect(written.mcp_servers.brave.command).toBe('node9');
-    expect(written.mcp_servers.brave.args).toEqual(['mcp', '--upstream', 'npx server-brave']);
+    expect(written.mcp_servers.brave.args).toEqual([
+      'mcp-gateway',
+      '--upstream',
+      'npx server-brave',
+    ]);
+  });
+
+  it('repairs a wrap left behind with the invalid `mcp` subcommand', async () => {
+    // Wiring pin, not a helper test. The wrap loop skips anything already
+    // commanded by `node9`, so before the repair call a broken wrap survived
+    // every upgrade untouched — the user's server stayed dead and node9 kept
+    // reporting the agent as wired. Same trap the hook self-heal had to solve.
+    withExistingTomlFile(configPath, {
+      mcp_servers: {
+        brave: { command: 'node9', args: ['mcp', '--upstream', 'npx server-brave'] },
+        node9: { command: 'node9', args: ['mcp-server'] },
+      },
+    });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupCodex();
+
+    const written = writtenTomlTo(configPath);
+    expect(written.mcp_servers.brave.args).toEqual([
+      'mcp-gateway',
+      '--upstream',
+      'npx server-brave',
+    ]);
+    // node9's own server entry is not a wrap and must not be touched.
+    expect(written.mcp_servers.node9.args).toEqual(['mcp-server']);
   });
 
   it('skips MCP wrapping when user denies', async () => {
@@ -1807,7 +1845,7 @@ describe('teardownCodex', () => {
   it('unwraps node9-wrapped MCP servers', () => {
     withExistingTomlFile(configPath, {
       mcp_servers: {
-        brave: { command: 'node9', args: ['mcp', '--upstream', 'npx server-brave'] },
+        brave: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx server-brave'] },
       },
     });
 
