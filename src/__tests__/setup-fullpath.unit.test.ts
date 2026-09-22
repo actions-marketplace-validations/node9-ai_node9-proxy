@@ -338,3 +338,18 @@ describe('isNode9Hook recognises the post-fix Windows shapes', () => {
     expect(isNode9Hook('node9 check --agent antigravity')).toBe(true);
   });
 });
+
+describe('Codex PreToolUse — a foreign hook must not be mistaken for coverage', () => {
+  // Dogfound on Windows 2026-09-22: a leftover probe script owned the ^Bash$
+  // matcher. `node9 agents remove codex` left it (correctly — it is not ours),
+  // and `add` then skipped the matcher because an ENTRY existed, so Bash stayed
+  // ungated while setup printed "hooks added" and doctor read the file as
+  // wired. The predicate has to be "is node9 present", not "does a matcher
+  // entry exist" — the same shape as the UserPromptSubmit/PostToolUse checks
+  // a few lines below it in setup.ts.
+  it('does not treat a non-node9 command as a node9 hook', () => {
+    expect(isNode9Hook('C:\\Users\\u\\.codex\\probes\\probe-flat.cmd')).toBe(false);
+    expect(isNode9Hook('some-other-tool --check')).toBe(false);
+    expect(isNode9Hook(undefined)).toBe(false);
+  });
+});

@@ -1658,6 +1658,18 @@ export async function setupCodex(): Promise<void> {
         hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
       });
       hooksChanged = true;
+    } else if (!existing.hooks.some((h) => isNode9Hook(h.command ?? ''))) {
+      // The matcher exists but nothing under it is ours: another tool, or a
+      // leftover, owns this tool surface. Keying the decision on "does a
+      // matcher entry exist" instead of "is node9 present" let that case fall
+      // through silently — setup then printed "hooks added" while the surface
+      // stayed ungated, and doctor read the file as wired because the OTHER
+      // matchers were node9. Dogfound on Codex/Windows 2026-09-22, where a
+      // foreign ^Bash$ hook survived a full remove + add cycle.
+      // Append rather than replace: Codex runs every hook under a matcher, so
+      // the user's own command keeps working alongside ours.
+      existing.hooks.push({ type: 'command', command: fullPathCommand('check'), timeout: 600 });
+      hooksChanged = true;
     } else {
       // Self-heal stale absolute paths (mirrors setupClaudeCode behavior).
       for (const h of existing.hooks) {

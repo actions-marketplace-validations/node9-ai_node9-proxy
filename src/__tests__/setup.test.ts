@@ -1588,6 +1588,41 @@ describe('setupCodex', () => {
     expect(writtenTo(hooksPath)).toBeNull();
   });
 
+  it('adds node9 to a matcher owned by a foreign command instead of skipping it', async () => {
+    // Dogfound on Windows 2026-09-22. A leftover probe script owned ^Bash$.
+    // `agents remove codex` left it alone (correct — it is not ours), and the
+    // install then skipped the matcher because an ENTRY existed, so the most
+    // important tool surface stayed ungated while setup printed "hooks added"
+    // and doctor read the file as wired, because the OTHER matchers were node9.
+    const foreign = 'C:\\Users\\u\\.codex\\probes\\probe-flat.cmd';
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: foreign }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+
+    await setupCodex();
+
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+    const bash = written.hooks.PreToolUse.find((m: { matcher: string }) => m.matcher === '^Bash$');
+    const commands = bash.hooks.map((h: { command: string }) => h.command);
+    // Ours is now there...
+    expect(commands).toContain('node9 check');
+    // ...and the user's own command was not clobbered. Codex runs every hook
+    // under a matcher, so both coexist.
+    expect(commands).toContain(foreign);
+  });
+
   it('rewrites hooks whose absolute paths no longer exist on disk', async () => {
     const stalePre =
       '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js check';
