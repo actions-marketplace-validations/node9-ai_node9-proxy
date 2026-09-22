@@ -194,7 +194,8 @@ function printInlineAskNotice(): void {
  */
 export function fullPathCommand(
   subcommand: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  home: string = os.homedir()
 ): string {
   if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
   const nodeExec = toForwardSlashes(process.execPath); // e.g. C:/Program Files/nodejs/node.exe
@@ -210,7 +211,53 @@ export function fullPathCommand(
     return isWindows ? `node9 ${subcommand}` : `"${cliScript}" ${subcommand}`;
   }
   if (isWindows) return `node "${cliScript}" ${subcommand}`;
-  return `"${nodeExec}" "${cliScript}" ${subcommand}`;
+  // POSIX: the command in the agent's config points at a shim node9 owns,
+  // not at node + cli.js directly. Codex keys hook trust to the command's
+  // CONTENT, so a command that embeds process.execPath expires every time nvm
+  // switches node versions — and node9's own self-heal then rewrites it,
+  // which is exactly the moment Codex silently stops running the hook
+  // (measured 2026-09-22; see codex-trust.ts). The shim's PATH never changes;
+  // its BODY carries the absolute node + cli.js and is rewritten freely.
+  // Windows keeps `node "<cli.js>"`: `node` is a PATH lookup there and the
+  // cli.js path lives under the npm prefix, so it is already upgrade-stable.
+  ensureHookShim(home, nodeExec, cliScript);
+  return `"${hookShimPath(home)}" ${subcommand}`;
+}
+
+// ── Hook shim ──────────────────────────────────────────────────────────────────
+// ~/.node9/bin/hook — a two-line sh script that execs the real CLI. Exists so
+// the hook command written into agent configs is a constant per machine.
+export function hookShimPath(home: string = os.homedir()): string {
+  return path.join(home, '.node9', 'bin', 'hook');
+}
+
+export function hookShimBody(nodeExec: string, cliScript: string): string {
+  return (
+    '#!/bin/sh\n' +
+    '# node9 hook shim — written by `node9 init` / `node9 agents add`. Do not edit.\n' +
+    '# Agents call this fixed path; node9 rewrites the line below on upgrade so\n' +
+    '# the hook command they trusted never changes (Codex keys trust to it).\n' +
+    `exec "${nodeExec}" "${cliScript}" "$@"\n`
+  );
+}
+
+/**
+ * Write the shim when it is missing or its body no longer points at the
+ * current node + cli.js. Idempotent and cheap (one read + compare); safe to
+ * call from every setup flow. Exported so tests can pin the on-disk result.
+ */
+export function ensureHookShim(home: string, nodeExec: string, cliScript: string): boolean {
+  const shim = hookShimPath(home);
+  const body = hookShimBody(nodeExec, cliScript);
+  try {
+    if (fs.readFileSync(shim, 'utf-8') === body) return false;
+  } catch {
+    // missing — fall through and write
+  }
+  fs.mkdirSync(path.dirname(shim), { recursive: true });
+  fs.writeFileSync(shim, body, { mode: 0o755 });
+  fs.chmodSync(shim, 0o755); // writeFileSync's mode is masked by umask and ignored on overwrite
+  return true;
 }
 
 function toForwardSlashes(p: string): string {
@@ -296,6 +343,19 @@ export function isWindowsQuoteBrokenHook(
 // Separating the predicates keeps each name describing one thing; this
 // wrapper exists so the 6 call sites in setupClaude / setupCodex don't
 // repeat the OR.
+// The pre-shim POSIX form: two quoted absolute paths, the first of which is
+// process.execPath. Correct and runnable, but it changes whenever nvm switches
+// node — and on Codex every change silently expires trust. Migrating it to the
+// shim costs the user ONE re-trust now instead of one per node upgrade. Never
+// fires on Windows, where this shape is the D1 bug and already handled above.
+export function isChurnProneHookForm(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!command || platform === 'win32') return false;
+  return /^"[^"]+" "[^"]*cli\.js" (?:check|log|hud)\b/.test(command.trim());
+}
+
 export function needsRewrite(
   command: string,
   platform: NodeJS.Platform = process.platform
@@ -303,7 +363,8 @@ export function needsRewrite(
   return (
     isStaleHookCommand(command) ||
     isLegacyHookFormat(command) ||
-    isWindowsQuoteBrokenHook(command, platform)
+    isWindowsQuoteBrokenHook(command, platform) ||
+    isChurnProneHookForm(command, platform)
   );
 }
 
@@ -387,7 +448,12 @@ export function isNode9Hook(cmd: string | undefined): boolean {
   if (!cmd) return false;
   return (
     /(?:^|[\s/\\"])node9"? (?:check|log)/.test(cmd) ||
-    /(?:^|[\s/\\])cli\.js"? (?:check|log)/.test(cmd)
+    /(?:^|[\s/\\])cli\.js"? (?:check|log)/.test(cmd) ||
+    // The shim form: "<home>/.node9/bin/hook" check. Without this alternative a
+    // freshly wired install reads back as "not wired" and setup appends
+    // duplicate hooks on every re-run — the same trap the quoted-binary form
+    // fell into after #185.
+    /[/\\]\.node9[/\\]bin[/\\]hook"? (?:check|log)/.test(cmd)
   );
 }
 
