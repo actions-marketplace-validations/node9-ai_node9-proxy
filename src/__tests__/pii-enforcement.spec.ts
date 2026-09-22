@@ -3,7 +3,8 @@
 // GAP-7: wire the existing PII detector into the realtime authorize path.
 // PII enforcement is a reliable on/off block (no fragile "review" routing):
 //   dlp.pii: 'block'  → SSN / Credit Card in tool args is denied in realtime
-//   dlp.pii: 'off'    → detector does not gate (default — opt-in for compliance)
+//                       (the DEFAULT since 2026-09-22)
+//   dlp.pii: 'off'    → the detector never runs at all; nothing is detected
 //
 // Scoped to high-signal PII (SSN, Credit Card). Email/Phone are excluded from
 // realtime gating (too noisy) — see detectArgsPii.
@@ -70,10 +71,15 @@ describe('GAP-7 — realtime PII enforcement', () => {
     expect(r.approved).toBe(true);
   });
 
-  it('is OFF by default (no pii key) — SSN allowed', async () => {
+  // Pins the SHIPPED default, not a passthrough: mockConfig writes a partial
+  // policy that the builder merges over DEFAULT_CONFIG, so an absent pii key
+  // resolves to whatever node9 ships. Flipping that default back to 'off'
+  // fails here, on purpose.
+  it('is ON by default (no pii key) — SSN blocked', async () => {
     mockConfig({ dlp: { enabled: true } });
     const r = await authorizeHeadless('Bash', { command: `echo ${SSN}` });
-    expect(r.approved).toBe(true);
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
   });
 
   it('does not block a plain email even when pii = "block" (high-signal only)', async () => {
