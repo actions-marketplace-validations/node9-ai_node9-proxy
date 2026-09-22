@@ -569,7 +569,31 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // legitimate-use corpus already marks as false positives, 0 attack rows, 0
 // loosened in the file slot. The last row is the honest residue: sed and awk
 // keep their false positive until stage 5b gives them an in-program file grammar.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
+// v16 (2026-09-22): FS_OP_PRESCREEN_RE was built with no `i` flag, so a
+// capitalised verb failed the fast path and analyzeFsOperation returned before
+// the AST ran. `CAT .env` and `GREP -c . .env` produced no finding at all,
+// while `cat .env` blocked. On macOS and Windows those commands RUN — both
+// filesystems resolve `CAT` to `cat` — so this is history that really happened
+// and is currently under-reported, which is what makes the re-scan worth its
+// cost. Measured through extractCanonicalFindings, not through the gate
+// (scan/verb-case-measure.spec.ts holds the measurement):
+//
+//   command                    v15       v16
+//   CAT .env                  (none) →  ast-fs-op block/high
+//   Cat .env                  (none) →  ast-fs-op block/high
+//   GREP -c . .env            (none) →  ast-fs-op block/high
+//   CAT ~/.aws/credentials    (none) →  ast-fs-op block/critical
+//   cat .env                  block  →  block     (control, unmoved)
+//   cat ~/.aws/credentials    block  →  block     (control, unmoved)
+//   git commit -m "Update CAT config"  (none) → (none)  (reaches the parser
+//                                                        now, still clean)
+//
+// ⚠️ Still blind after v16: PowerShell verbs (`Get-Content`, `gc`, `iwr`,
+// `iex`) are absent from FS_READ_TOOLS, so no amount of folding reaches them.
+// Folding had to land first — those verbs arrive capitalised and would not
+// have matched a case-sensitive set. See
+// doc/roadmap/active/windows-shell-dialect-blindness-design.md mechanism A.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v16';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -589,7 +613,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v15';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2823cd6a54a1fca7';
+export const CANONICAL_EXTRACTOR_HASH = '5d450ab100864451';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

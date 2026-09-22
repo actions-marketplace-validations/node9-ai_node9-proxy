@@ -382,3 +382,68 @@ describe('node9 doctor — stalled shipping and rejected keys', () => {
     expect(output).not.toMatch(/Cloud policy fresh/);
   });
 });
+
+// ── Codex trust ───────────────────────────────────────────────────────────────
+// A wired Codex hook is not a running one: Codex skips any hook the user has
+// not trusted, trust is keyed to hooks.json content, and node9 rewrites that
+// file on every init/add/self-heal. doctor used to print "hook active" on
+// machines where Codex was running every command unchecked. These rows pin
+// the three honest states and the absence of the old "/hooks" instruction.
+
+describe('node9 doctor — Codex trust', () => {
+  const hooksJson = {
+    hooks: {
+      PreToolUse: [
+        { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check', timeout: 600 }] },
+      ],
+    },
+  };
+  const trusted =
+    'model = "x"\n' +
+    '[hooks.state."hooks.json:pre_tool_use:0:0"]\n' +
+    'trusted_hash = "sha256:aaa"\n';
+
+  function codexHome(name: string, configToml: string, auditRows: object[] = []): string {
+    const home = path.join(tmpBase, name);
+    writeJson(path.join(home, '.codex', 'hooks.json'), hooksJson);
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), configToml);
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'audit.log'),
+      auditRows.map((r) => JSON.stringify(r)).join('\n') + (auditRows.length ? '\n' : '')
+    );
+    return home;
+  }
+
+  it('fails, not passes, when Codex has never trusted the hooks', () => {
+    const home = codexHome('codex-never', 'model = "x"\n');
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/Codex — hooks wired but Codex has never trusted them/);
+    expect(output).not.toMatch(/Codex — PreToolUse hook active/);
+    expect(output).not.toMatch(/run \/hooks/);
+    expect(output).toMatch(/Trust all and continue/);
+  });
+
+  it('warns when trust entries exist but nothing from Codex has arrived since the rewrite', () => {
+    const home = codexHome('codex-unverified', trusted);
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/Codex — hooks written .*; no Codex activity has reached node9 since/);
+    expect(output).toMatch(/NOT trusted/);
+    expect(output).not.toMatch(/Codex — PreToolUse hook active/);
+  });
+
+  it('passes only when a Codex audit row is newer than hooks.json', () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const home = codexHome('codex-observed', trusted, [
+      { ts: future, tool: 'Bash', decision: 'allow', agent: 'Codex' },
+    ]);
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/Codex — PreToolUse hook active and trusted/);
+  });
+
+  it('fails when hooks are disabled in config.toml even though they are wired', () => {
+    const home = codexHome('codex-disabled', '[features]\nhooks = false\n');
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/Codex — hooks wired but DISABLED/);
+  });
+});

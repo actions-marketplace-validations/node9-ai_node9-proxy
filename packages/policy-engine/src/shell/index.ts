@@ -1134,7 +1134,14 @@ const FS_OP_PRESCREEN_RE = new RegExp(
     // and `Y=$(<X)` never reach the parser, because neither contains a reader
     // word: the exact trap that sank the first copy-verb attempt. `<<` and
     // `<<<` are excluded; they supply text, not a file.
-    '|(?<!<)<(?!<)'
+    '|(?<!<)<(?!<)',
+  // Case-insensitive on purpose. Without `i`, `CAT .env` failed this fast path
+  // and analyzeFsOperation returned before the AST ran at all — a live bypass
+  // on macOS and Windows, whose filesystems resolve `CAT` to `cat`, and on
+  // PowerShell, which is case-insensitive by language. Linux is unaffected in
+  // practice (`CAT` is not an executable there) but folding costs nothing.
+  // Dogfound 2026-09-22; pinned by verb-case-coverage.spec.ts.
+  'i'
 );
 
 // Cache directories under $HOME that are tool-managed. Deleting them is safe
