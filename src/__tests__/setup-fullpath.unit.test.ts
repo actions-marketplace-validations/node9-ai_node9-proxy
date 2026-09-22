@@ -123,7 +123,7 @@ describe('fullPathCommand', () => {
       '/Users/Some User/.nvm/versions/node/v22.0.0/bin/node',
       '/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js'
     );
-    expect(fullPathCommand('log')).toBe(
+    expect(fullPathCommand('log', 'linux')).toBe(
       '"/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" ' +
         '"/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" ' +
         'log'
@@ -138,7 +138,7 @@ describe('fullPathCommand', () => {
       '/usr/local/bin/node', // ignored on this branch
       '/usr/local/bin/node9' // ends without .js
     );
-    expect(fullPathCommand('check')).toBe('"/usr/local/bin/node9" check');
+    expect(fullPathCommand('check', 'linux')).toBe('"/usr/local/bin/node9" check');
   });
 
   it('still emits the bare "node9 <sub>" form under NODE9_TESTING=1', () => {
@@ -284,7 +284,7 @@ describe('needsRewrite (#185 follow-up)', () => {
 
   it('returns false for a well-formed hook whose paths exist', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
-    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check')).toBe(false);
+    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check', 'linux')).toBe(false);
   });
 });
 

@@ -25,7 +25,7 @@
  * calibration: if it ever starts passing, these tests have stopped measuring
  * the thing they were written for.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -89,6 +89,12 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
 
 describe.skipIf(!isWindows)('hook command launches under every Windows shell', () => {
   beforeAll(() => {
+    // vitest.config.mts pins env.NODE9_TESTING = '1', which makes
+    // fullPathCommand short-circuit to a bare `node9 <sub>` that is not
+    // installed on a CI runner. Without clearing it this file measures nothing
+    // but "node9 is not on PATH" — which is how its first run failed. The
+    // config has no unstubEnvs, so a beforeAll stub holds for the whole file.
+    vi.stubEnv('NODE9_TESTING', '');
     dirWithSpace = fs.mkdtempSync(path.join(os.tmpdir(), 'node9 hook '));
     stubScript = path.join(dirWithSpace, 'cli.js');
     // Stands in for cli.js: drains stdin and exits 0. The question under test
@@ -101,6 +107,7 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
   });
 
   afterAll(() => {
+    vi.unstubAllEnvs();
     restore();
     if (dirWithSpace) fs.rmSync(dirWithSpace, { recursive: true, force: true });
   });
@@ -111,10 +118,20 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
     });
   }
 
+  it('emits a command that does not begin with a quote', () => {
+    // The property the runners above depend on, asserted directly so a failure
+    // says which half broke: the shape, or its execution.
+    expect(fullPathCommand('check', 'win32').startsWith('"')).toBe(false);
+  });
+
   it('confirms the pre-fix form still fails, so these tests still measure something', () => {
+    // Two quoted paths, which is what fullPathCommand used to emit. cmd's
+    // rule-2 stripping removes the leading quote and the last one, leaving a
+    // stray quote welded onto the first token; whether the runner's own node
+    // path contains a space only changes which token ends up mangled.
     const broken = `"${toForwardSlashes(process.execPath)}" "${toForwardSlashes(stubScript)}" check`;
-    // cmd without /s is the form that breaks; /s is the documented escape and
-    // is expected to keep working, which is exactly why it hid the bug.
+    // /s is the documented escape from rule 2 and keeps working — which is
+    // exactly why Node's own `shell: true` never surfaced the bug.
     expect(RUNNERS[0].run(broken)).not.toBe(0);
     expect(RUNNERS[2].run(broken)).not.toBe(0);
   });
