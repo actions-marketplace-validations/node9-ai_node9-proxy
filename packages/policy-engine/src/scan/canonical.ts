@@ -593,7 +593,32 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Folding had to land first — those verbs arrive capitalised and would not
 // have matched a case-sensitive set. See
 // doc/roadmap/active/windows-shell-dialect-blindness-design.md mechanism A.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v16';
+// v17 (2026-09-23): the verb vocabulary learned PowerShell. FS_READ_TOOLS gained
+// get-content/gc/select-string/sls/format-hex/import-csv/import-clixml;
+// DOWNLOAD_CMDS, NET_BINARIES and pipe-chain's SINK_COMMANDS gained
+// iwr/irm/invoke-webrequest/invoke-restmethod; SHELL_INTERPRETERS gained
+// iex/invoke-expression/powershell/pwsh. Codex on Windows writes idiomatic
+// PowerShell, so these reads happened on real machines and produced no finding
+// at all — the history users see under-reports them, which is what makes the
+// re-scan worth its cost. Measured through extractCanonicalFindings
+// (scan/powershell-measure.spec.ts holds the measurement):
+//
+//   command                          v16       v17
+//   Get-Content .env                (none) →  ast-fs-op block/high
+//   gc .env                         (none) →  ast-fs-op block/high
+//   Select-String KEY .env          (none) →  ast-fs-op block/high
+//   GET-CONTENT ~/.aws/credentials  (none) →  ast-fs-op block/critical
+//   gc ~/.ssh/id_rsa                (none) →  ast-fs-op block/critical
+//   Format-Hex ~/.ssh/id_rsa        (none) →  ast-fs-op block/critical
+//   cat .env                        block  →  block            (control, unmoved)
+//   Get-Content README.md           (none) →  (none)           (still clean)
+//   git commit -m "gc tuning"       (none) →  (none)           (gc as a WORD, not a verb)
+//
+// NOT in this table, on purpose: `iwr … | iex`. Pipe-to-shell is a smart rule
+// (DEFAULT_CONFIG's review-curl-pipe-shell and the bash-safe shield copy), not
+// an engine detector — the engine alone emits nothing for `curl | sh` either.
+// Its widening is real and gated live, but it changes no history scan.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v17';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -613,7 +638,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v16';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '5d450ab100864451';
+export const CANONICAL_EXTRACTOR_HASH = 'ca0a79b38a804347';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

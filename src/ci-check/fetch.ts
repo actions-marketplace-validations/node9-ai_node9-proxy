@@ -5,6 +5,7 @@
 // degrades to a note (fail-open) so a rate-limit or missing dir never throws.
 
 import fs from 'fs';
+import { INSTRUCTION_FILE_RE } from './instructions';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
@@ -60,8 +61,11 @@ const WORKFLOW_DIR = '.github/workflows';
 // agent surface in sub-packages: `packages/api/CLAUDE.md`, `apps/web/.claude/settings.json`).
 // Workflows are NOT here — `.github/workflows` is only valid at the repo root (enumerated
 // separately). Mirrors the dispatch regexes in index.ts so anything discovered is analyzed.
-const SURFACE_BASENAME =
-  /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
+// Instruction files come from the ONE definition in instructions.ts; only the config shapes
+// are spelled here. Adding a surface type means one edit, and the dispatcher sees it too.
+const CONFIG_FILE_RE =
+  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
+const SURFACE_BASENAME = new RegExp(`${INSTRUCTION_FILE_RE.source}|${CONFIG_FILE_RE.source}`);
 // Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
 // `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
 const IGNORE_HARD = /(^|\/)(node_modules|vendor|\.git|\.next|\.venv|site-packages)\//;

@@ -54,13 +54,15 @@ describe('canonical extractor sees capitalised reads (v15 → v16)', () => {
     );
   });
 
-  it('is still blind to PowerShell verbs — mechanism A, deliberately not in this change', () => {
-    // Recorded, not fixed here. `Get-Content` is absent from FS_READ_TOOLS, so
-    // no amount of case folding reaches it. Folding had to land FIRST, because
-    // PowerShell verbs arrive capitalised and would not have matched a
-    // case-sensitive set. This row is the handoff to that work: when the
-    // vocabulary lands, it flips and the expectation below must be inverted.
-    expect(astFinding('Get-Content ~/.ssh/id_rsa')).toBeUndefined();
+  it('sees PowerShell verbs now — mechanism A landed on top of the case fold', () => {
+    // This row was written as a handoff: at v16 it asserted `toBeUndefined`,
+    // because `Get-Content` was absent from FS_READ_TOOLS and no amount of
+    // case folding could reach it. Folding had to land FIRST — PowerShell
+    // verbs arrive capitalised and would not have matched a case-sensitive
+    // set. The vocabulary landed next (v17) and the expectation inverted.
+    const f = astFinding('Get-Content ~/.ssh/id_rsa');
+    expect(f).toBeDefined();
+    expect(f!.ruleName).toBe('shield:project-jail:block-read-ssh');
   });
 
   it('does not invent findings for ordinary capitalised words', () => {

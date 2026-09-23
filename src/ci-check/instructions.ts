@@ -59,26 +59,41 @@ function suspiciousZeroWidth(text: string): number {
 }
 const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 
+/** Every committed file an agent loads as instructions on its own. ONE definition: the tree
+ *  walk in fetch.ts picks by it and the dispatcher in index.ts routes by it, so a file can
+ *  never be fetched and then silently dropped, or the reverse. The last three shapes are the
+ *  Agent Skills standard (`SKILL.md`, loaded by Claude Code, Codex, Hermes, OpenClaw and Pi)
+ *  and Claude Code's own subagents and slash commands. Measured over 389 real skill files
+ *  before they were added (2026-09-22): 4 of 4 known-malicious fixtures caught; 12 benign
+ *  files flagged, every one a false positive, in the shapes fixed alongside this change. */
+export const INSTRUCTION_FILE_RE =
+  /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)SKILL\.md$|(^|\/)\.claude\/agents\/[^/]+\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
+
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare
 // "system:" (too FP-prone in docs).
 const OVERRIDE_RE =
   /ignore\s+(all\s+)?(previous|prior|the\s+above)\s+(instructions|prompts?|rules)|disregard\s+(the\s+|your\s+)?(system\s+)?(prompt|instructions|rules)|forget\s+(everything|all\s+(previous|prior))|you\s+are\s+now\s+(a|an|the)\b|<\/?system>/i;
 
 // ── Tier 2: dangerous sink WITH agent-directive framing → medium ───────────────
-// Remote-exec (fetch-and-obey).
+// Remote-exec (fetch-and-obey). `| python3 -m json.tool` pretty-prints the fetched bytes,
+// it does not execute them (2 of the 12 skill-corpus false positives, 2026-09-22).
 const FETCH_OBEY_RE =
-  /\b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(bash|sh|zsh|python3?|node|iex)\b|\b(curl|wget)\b[^\n]*&&[^\n]*\b(bash|sh)\b/i;
+  /\b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(bash|sh|zsh|python3?(?!\s+-m\s+json\.tool\b)|node|iex)\b|\b(curl|wget)\b[^\n]*&&[^\n]*\b(bash|sh)\b/i;
 // Credential-file access.
 const SECRET_PATH_RE =
   /~\/\.aws\/credentials|~\/\.ssh\/id_[a-z]+|~\/\.config\/gh\/hosts|read\s+the\s+(token|secret|api[_ ]?key|password)\s+(in|from)\s+[.`'"]?\.?env/i;
-// Exfil to an external endpoint.
+// Exfil to an external endpoint. "Send the user to https://…" moves a person, not data
+// (2 of the 12 skill-corpus false positives, 2026-09-22).
 const EXFIL_RE =
-  /\b(post|send|upload|exfiltrate|forward)\b[^\n]{0,40}\b(to|at)\b[^\n]{0,50}(https?:\/\/|webhook|hook\.[a-z])/i;
+  /\b(post|send|upload|exfiltrate|forward)\b(?!\s+(the\s+|your\s+)?(users?|them|him|her|people|visitors?|customers?|readers?)\b)[^\n]{0,40}\b(to|at)\b[^\n]{0,50}(https?:\/\/|webhook|hook\.[a-z])/i;
 
 // A human-facing section (install/dev docs) — a `curl|bash` here is setup guidance for a
 // PERSON, not a directive to the agent. Down-weights Tier-2 sinks.
+// The keyword may sit anywhere in the heading: "### Standalone installer", and a
+// `# Shell script (installs to …)` comment inside a fence that the line scan takes for a
+// heading (2 of the 12 skill-corpus false positives, 2026-09-22).
 const HUMAN_SECTION_RE =
-  /^#+\s*(install|installation|setup|set ?up|getting started|quick ?start|contributing|contribution|development|dev setup|build|prerequisites|requirements|usage)\b/i;
+  /^#+\s.*\b(install(ation|ers?|ing|s)?|setup|set ?up|getting started|quick ?start|contributing|contribution|development|dev setup|build|prerequisites|requirements|usage)\b/i;
 
 // A safety/negation clause ("never read ~/.aws/…", "do NOT curl | bash") — the presence
 // of the sink here is a GUARDRAIL, not a directive. Prevents flagging a repo for its own
@@ -87,6 +102,22 @@ const NEGATION_RE = /\b(never|do not|don'?t|avoid|must not|should not|no need to
 
 function isNegated(text: string, idx: number): boolean {
   return NEGATION_RE.test(text.slice(Math.max(0, idx - 40), idx));
+}
+
+// A sink or override QUOTED as an example of what to ignore or refuse. An official Anthropic
+// plugin tells the agent to treat strings like "ignore previous instructions" as inert labels,
+// and a computer-use skill lists `curl … | bash` among its blocked patterns (2 of the 12
+// skill-corpus false positives, 2026-09-22). BOTH conditions are required: the match is the
+// whole of a quoted or backticked span, AND the 120 chars before it carry example/refusal
+// framing. Quoting alone is not enough — a quoted directive is still a directive to a model.
+const EXAMPLE_FRAMING_RE =
+  /\b(like|such as|e\.g\.|for example|examples?|including|shaped like|inert|block ?list|blocked|blocks?|patterns?|treat|labels?|strings?|phrases?|reject|flags?|detects?|matches)\b/i;
+
+function isQuotedExample(text: string, idx: number, len: number): boolean {
+  const open = text[idx - 1];
+  const close = text[idx + len];
+  const quoted = (open === '"' || open === "'" || open === '`') && close === open;
+  return quoted && EXAMPLE_FRAMING_RE.test(text.slice(Math.max(0, idx - 120), idx));
 }
 
 function inHumanSection(text: string, idx: number): boolean {
@@ -197,7 +228,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
       )
     );
   }
-  const ov = OVERRIDE_RE.exec(content);
+  const ovRaw = OVERRIDE_RE.exec(content);
+  const ov = ovRaw && !isQuotedExample(content, ovRaw.index, ovRaw[0].length) ? ovRaw : null;
   const ovEnc = !ov ? OVERRIDE_RE.exec(decoded) : null;
   if (ov || ovEnc) {
     const m = (ov || ovEnc)!;
@@ -217,7 +249,12 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
 
   // Tier 2 — sink + agent-directive framing (skip human install docs + safety clauses)
   const fo = FETCH_OBEY_RE.exec(content);
-  if (fo && !inHumanSection(content, fo.index) && !isNegated(content, fo.index)) {
+  if (
+    fo &&
+    !inHumanSection(content, fo.index) &&
+    !isNegated(content, fo.index) &&
+    !isQuotedExample(content, fo.index, fo[0].length)
+  ) {
     findings.push(
       mk(
         'CI-6.fetch-and-obey',

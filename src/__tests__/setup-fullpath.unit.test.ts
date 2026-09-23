@@ -24,7 +24,22 @@ import {
   isLegacyHookFormat,
   needsRewrite,
   isWindowsQuoteBrokenHook,
+  isChurnProneHookForm,
+  isNode9StatusLine,
+  hookShimPath,
+  hookShimBody,
+  ensureHookShim,
 } from '../setup.js';
+import os from 'os';
+import path from 'path';
+
+// A throwaway HOME for the shim rows, so fullPathCommand's POSIX branch never
+// touches the real ~/.node9.
+let shimHome = '';
+function freshShimHome(): string {
+  shimHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-shim-'));
+  return shimHome;
+}
 
 // process.execPath is technically settable but not writable on all
 // platforms (we run on Linux for CI, so it is). Helper to stub safely
@@ -110,9 +125,17 @@ describe('fullPathCommand', () => {
       '/usr/bin/node',
       '/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js'
     );
-    expect(fullPathCommand('check', 'linux')).toBe(
-      '"/usr/bin/node" "/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js" check'
+    const home = freshShimHome();
+    // The command in the agent's config is the shim's fixed path, quoted.
+    // node + cli.js live INSIDE the shim, where changing them changes nothing
+    // an agent has trusted.
+    expect(fullPathCommand('check', 'linux', home)).toBe(
+      `"${hookShimPath(home).replace(/\\/g, '/')}" check`
     );
+    expect(fs.readFileSync(path.join(home, '.node9', 'bin', 'hook'), 'utf-8')).toBe(
+      hookShimBody('/usr/bin/node', '/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js')
+    );
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it('quotes a POSIX path with spaces (e.g. /Users/Some User/...)', () => {
@@ -123,11 +146,35 @@ describe('fullPathCommand', () => {
       '/Users/Some User/.nvm/versions/node/v22.0.0/bin/node',
       '/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js'
     );
-    expect(fullPathCommand('log', 'linux')).toBe(
-      '"/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" ' +
-        '"/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" ' +
-        'log'
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9 shim space '));
+    // The shim path itself is quoted, so a $HOME with a space still survives.
+    expect(fullPathCommand('log', 'linux', home)).toBe(
+      `"${hookShimPath(home).replace(/\\/g, '/')}" log`
     );
+    // And the space-bearing node path is quoted INSIDE the shim.
+    expect(fs.readFileSync(path.join(home, '.node9', 'bin', 'hook'), 'utf-8')).toContain(
+      'exec "/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" "/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" "$@"'
+    );
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('does not rewrite the shim when its body is already current (trust-safe re-runs)', () => {
+    restoreProcess = stubProcess('/usr/bin/node', '/opt/node9/dist/cli.js');
+    const home = freshShimHome();
+    expect(ensureHookShim(home, '/usr/bin/node', '/opt/node9/dist/cli.js')).toBe(true);
+    const shim = hookShimPath(home);
+    const before = fs.statSync(shim).mtimeMs;
+    expect(ensureHookShim(home, '/usr/bin/node', '/opt/node9/dist/cli.js')).toBe(false);
+    expect(fs.statSync(shim).mtimeMs).toBe(before);
+    // A node upgrade changes only the body — the path agents trusted is intact.
+    expect(ensureHookShim(home, '/usr/bin/node-v23', '/opt/node9/dist/cli.js')).toBe(true);
+    expect(fs.readFileSync(shim, 'utf-8')).toContain('"/usr/bin/node-v23"');
+    // POSIX only: Windows has no executable bit, and the shim is a POSIX-branch
+    // artifact anyway. Asserting it there measured the host, not the code.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(shim).mode & 0o111).not.toBe(0);
+    }
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it('quotes the bare-binary global-install form (no .js suffix)', () => {
@@ -284,7 +331,12 @@ describe('needsRewrite (#185 follow-up)', () => {
 
   it('returns false for a well-formed hook whose paths exist', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
-    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check', 'linux')).toBe(false);
+    // "Well-formed" on POSIX now means the shim form. The two-quoted-path form
+    // this row used to hold up as correct is exactly the one that expires
+    // Codex trust on every nvm switch, and it is migrated on purpose — see
+    // the isChurnProneHookForm block.
+    expect(needsRewrite('"/home/u/.node9/bin/hook" check', 'linux')).toBe(false);
+    expect(needsRewrite('"/usr/local/bin/node9" check', 'linux')).toBe(false);
   });
 });
 
@@ -308,7 +360,11 @@ describe('isWindowsQuoteBrokenHook (cmd quote-stripping self-heal)', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     const posix = '"/usr/bin/node" "/usr/lib/node_modules/node9-ai/dist/cli.js" check';
     expect(isWindowsQuoteBrokenHook(posix, 'linux')).toBe(false);
-    expect(needsRewrite(posix, 'linux')).toBe(false);
+    // needsRewrite is still true for this string on linux — but via
+    // isChurnProneHookForm (migration to the shim), not via the Windows
+    // predicate. The two reasons are kept distinct so a failure names its cause.
+    expect(isChurnProneHookForm(posix, 'linux')).toBe(true);
+    expect(needsRewrite(posix, 'linux')).toBe(true);
     // Same string, Windows: still broken, because the rule is about cmd's
     // parser and not about the path it happens to contain.
     expect(isWindowsQuoteBrokenHook(posix, 'win32')).toBe(true);
@@ -351,5 +407,53 @@ describe('Codex PreToolUse — a foreign hook must not be mistaken for coverage'
     expect(isNode9Hook('C:\\Users\\u\\.codex\\probes\\probe-flat.cmd')).toBe(false);
     expect(isNode9Hook('some-other-tool --check')).toBe(false);
     expect(isNode9Hook(undefined)).toBe(false);
+  });
+});
+
+describe('isNode9Hook recognises the shim form', () => {
+  // Wiring pin. If this stops matching what fullPathCommand emits on POSIX,
+  // setup reads a freshly wired install as "not wired" and appends duplicate
+  // hooks on every re-run.
+  it('matches the quoted shim path with check, log and flags', () => {
+    expect(isNode9Hook('"/home/u/.node9/bin/hook" check')).toBe(true);
+    expect(isNode9Hook('"/home/u/.node9/bin/hook" log')).toBe(true);
+    expect(isNode9Hook('"/Users/Some User/.node9/bin/hook" check --agent antigravity')).toBe(true);
+  });
+  it('does not match a look-alike outside ~/.node9/bin', () => {
+    expect(isNode9Hook('"/home/u/bin/hook" check')).toBe(false);
+  });
+  it('the HUD statusLine matcher still owns the shim form (never clobbers a user statusLine)', () => {
+    expect(isNode9StatusLine('"/home/u/.node9/bin/hook" hud')).toBe(true);
+    expect(isNode9StatusLine('ccstatusline')).toBe(false);
+  });
+});
+
+describe('isChurnProneHookForm — migrating the pre-shim POSIX form', () => {
+  const OLD_POSIX =
+    '"/home/u/.nvm/versions/node/v22.0.0/bin/node" "/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js" check';
+
+  it('flags the two-quoted-path POSIX form so self-heal moves it onto the shim', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true); // paths exist — not "stale"
+    expect(isStaleHookCommand(OLD_POSIX)).toBe(false);
+    expect(isChurnProneHookForm(OLD_POSIX, 'linux')).toBe(true);
+    expect(needsRewrite(OLD_POSIX, 'linux')).toBe(true);
+  });
+
+  it('never fires on Windows — that shape is the D1 bug there and handled by its own predicate', () => {
+    const win = '"C:/Program Files/nodejs/node.exe" "C:/Users/u/dist/cli.js" check';
+    expect(isChurnProneHookForm(win, 'win32')).toBe(false);
+    // (needsRewrite still says true on win32, via isWindowsQuoteBrokenHook.)
+  });
+
+  it('does not flag the shim form, the bare form, or the global-binary form', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    for (const cmd of [
+      '"/home/u/.node9/bin/hook" check',
+      'node9 check',
+      '"/usr/local/bin/node9" check',
+    ]) {
+      expect(isChurnProneHookForm(cmd, 'linux'), cmd).toBe(false);
+      expect(needsRewrite(cmd, 'linux'), cmd).toBe(false);
+    }
   });
 });
