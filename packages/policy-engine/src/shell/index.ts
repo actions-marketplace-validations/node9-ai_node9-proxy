@@ -2280,6 +2280,53 @@ function recordAssignments(n: any): void {
   }
 }
 
+/**
+ * Stage 6, step 6 (JAIL-14, half two): the TRIVIALLY resolvable substitution.
+ * `$(echo X)`, `` `echo X` `` and `$(printf '%s' X)` with a literal X are not
+ * unknowable, they ARE X. The design's first answer -- let the suppressed regex
+ * twin speak for commands with a dynamic reader word -- was rejected by its own
+ * corpus: 15 of 25 legitimate rows would have become false positives and 7 of 19
+ * attacks would still have passed. Resolving the substitution instead involves no
+ * regex, so none of those false positives can occur, and every tier inherits it
+ * from this resolver exactly as `$HOME` did.
+ *
+ * Exactly one statement, no redirects, no assignments, a CallExpr whose head is
+ * `echo` or `printf`, every argument literal (resolved recursively, so
+ * `$(echo $HOME/x)` and a recorded `$K` work). echo drops its `-n`/`-e`/`-E`
+ * switches and joins the rest with one space. printf accepts only a `%s`
+ * format (with or without a trailing newline escape) and one argument; a real
+ * format is a computation. Anything else returns undefined: the substitution
+ * stays dynamic and belongs to the evalDynamic knob, as before.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveTrivialSubst(part: any): string | undefined {
+  if (syntax.NodeType(part) !== 'CmdSubst') return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stmts: any[] = part.Stmts || [];
+  if (stmts.length !== 1) return undefined;
+  const st = stmts[0];
+  if ((st.Redirs || []).length > 0 || st.Negated || st.Background) return undefined;
+  const cmd = st.Cmd;
+  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return undefined;
+  if ((cmd.Assigns || []).length > 0) return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
+  if (words.length === 0 || words.some((w) => w === null)) return undefined;
+  const head = baseWord(words[0]);
+  const rest = words.slice(1) as string[];
+  if (head === 'echo') {
+    let i = 0;
+    while (i < rest.length && /^-[neE]+$/.test(rest[i])) i++;
+    return rest.slice(i).join(' ');
+  }
+  if (head === 'printf') {
+    if (rest.length !== 2) return undefined;
+    if (!/^%s(\\n)?$/.test(rest[0])) return undefined;
+    return rest[1];
+  }
+  return undefined;
+}
+
 /** The recorded value for a plain expansion of `name`, or undefined when the
  *  table has nothing to say (which lets the HOME default speak). */
 function recordedExpansion(name: string | undefined): string | null | undefined {
@@ -2326,12 +2373,18 @@ function resolveWordLiteral(w: any): string | null {
       const e = expandPlainParam(p);
       if (e === null) return null; // assigned to something unknowable
       s += e;
+    } else if (t === 'CmdSubst' && assignmentTable && resolveTrivialSubst(p) !== undefined) {
+      // Only inside a jail walk, like variable expansion: the normalizer must not
+      // rewrite command text on this account either.
+      s += resolveTrivialSubst(p) as string;
     } else if (t === 'DblQuoted') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inner: any[] = p.Parts || [];
       // A plain `$HOME` or a recorded `$K` inside double quotes is the same value.
       const expandable = (ip: any): boolean =>
-        syntax.NodeType(ip) === 'Lit' || expandPlainParam(ip) !== undefined;
+        syntax.NodeType(ip) === 'Lit' ||
+        expandPlainParam(ip) !== undefined ||
+        (assignmentTable !== null && resolveTrivialSubst(ip) !== undefined);
       if (!inner.every(expandable)) return null;
       if (
         inner.some((ip: any) => syntax.NodeType(ip) === 'ParamExp' && expandPlainParam(ip) === null)
@@ -2343,11 +2396,12 @@ function resolveWordLiteral(w: any): string | null {
       // and every other backslash stay as written, which is what a regex in
       // double quotes needs.
       s += inner
-        .map((ip: any) =>
-          syntax.NodeType(ip) === 'ParamExp'
-            ? (expandPlainParam(ip) as string)
-            : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')
-        )
+        .map((ip: any) => {
+          const it = syntax.NodeType(ip);
+          if (it === 'ParamExp') return expandPlainParam(ip) as string;
+          if (it === 'CmdSubst') return resolveTrivialSubst(ip) as string;
+          return (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1');
+        })
         .join('');
     } else {
       return null; // dynamic
