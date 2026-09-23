@@ -345,6 +345,14 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         const source = command.slice(s, e);
         if (resolved === source) continue; // not obfuscated
         if (resolved === '' || /\s/.test(resolved)) continue; // data string, not a token
+        // ⚠️ Never rewrite a word into a bare shell OPERATOR. This loop's own
+        // contract is that operators and positions are preserved so the rules'
+        // command-boundary anchoring holds, and `\;` -> `;` breaks exactly that:
+        // `find . -exec true {} \; -exec cat KEY \;` was rewritten into two
+        // STATEMENTS, the second headed by `-exec`, so no tier judged it
+        // (/code-review, stage 6). The escaped spelling is the only one find
+        // accepts, so this is the common case, not a corner.
+        if (/^[;&|()<>]+$/.test(resolved)) continue;
         rewrites.push([s, e, resolved]);
         // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
         // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
@@ -1093,7 +1101,13 @@ const TAR_VALUE_LETTERS = ['b', 'C', 'f', 'F', 'g', 'H', 'I', 'K', 'L', 'N', 'T'
 // working. jail-copy.spec.ts derives a row from exactly that invariant.
 const ZIP_VALUE_LETTERS = ['b', 'n', 'P', 't', 's', 'O', 'x', 'i'];
 const RSYNC_VALUE_LETTERS = ['e', 'f', 'T', 'B', 'M'];
-const RSYNC_SKIP = [
+// The copy tier's own list of rsync flags whose next token is a value, not a
+// source. It is deliberately SHORTER than the egress tier's VALUE_FLAGS.rsync,
+// which is a conservative superset read off `rsync --help`: there, a flag wrongly
+// listed only costs a candidate host; here it would SKIP a real source word and
+// miss the copy. So this list holds only flags measured to take an operand, and
+// a spec row keeps it a subset of the egress table so the two cannot drift.
+export const RSYNC_SKIP = [
   'e',
   '--rsh',
   '--exclude',
@@ -2068,7 +2082,7 @@ export const NET_BINARIES = new Set([
 // Flags whose NEXT token is a value, not a destination. Conservative supersets —
 // missing a rare one only risks a false destination candidate (which is review,
 // not block, by default), never a missed real host.
-const VALUE_FLAGS: Record<string, Set<string>> = {
+export const VALUE_FLAGS: Record<string, Set<string>> = {
   // rsync 3.2.7, its own --help: every flag whose operand could be mistaken for
   // a host. `-e ssh` is the one that matters most (`ssh` is not the destination).
   rsync: new Set([
@@ -2250,16 +2264,44 @@ const HOME_VARIABLES = new Set(['HOME', 'USERPROFILE']);
  * walk inherits a copy, which over-inherits (a non-exported variable would not
  * reach a child shell) in the safe direction.
  */
-let assignmentTable: Map<string, string | null> | null = null;
+let assignmentTable: Map<string, { value: string | null; at: number }> | null = null;
+/** Byte offset of the statement being judged, so an assignment is visible only
+ *  to a LATER one: `cat $K; K=KEY` must stay null. Pre-filling the table (which
+ *  is what keeps a conditional assignment out, see recordTopLevelAssignments)
+ *  otherwise makes order stop mattering. */
+let currentStmtOffset = Number.MAX_SAFE_INTEGER;
 
 const ASSIGNMENT_HEADS = new Set(['export', 'declare', 'local', 'readonly', 'typeset']);
+
+/**
+ * The assignments of every UNCONDITIONAL TOP-LEVEL statement, in order, filled
+ * before the walk judges anything so a later use sees an earlier value. See the
+ * call site for why conditional statements are excluded.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function recordTopLevelAssignments(f: any): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stmts: any[] = Array.isArray(f?.Stmts) ? f.Stmts : [];
+  for (const stmt of stmts) {
+    if (!stmt || !stmt.Cmd) continue;
+    const t = syntax.NodeType(stmt.Cmd);
+    if (t !== 'CallExpr' && t !== 'DeclClause') continue;
+    let at = 0;
+    try {
+      at = stmt.Pos().Offset();
+    } catch {
+      at = 0;
+    }
+    recordAssignments(stmt.Cmd, at);
+  }
+}
 
 /** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
  *  (`HOME=/tmp/x cat $HOME/...`, Args present) are ignored on purpose: bash
  *  expands that command's own words with the OLD value, so the read is real and
  *  the default expansion is the right one; and they do not persist. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function recordAssignments(n: any): void {
+function recordAssignments(n: any, at: number): void {
   if (!assignmentTable) return;
   const t = syntax.NodeType(n);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2276,7 +2318,7 @@ function recordAssignments(n: any): void {
     const name: string | undefined = a?.Name?.Value;
     if (!name || !a.Value || a.Append) continue; // `export K` and `K+=x` are not followed
     // Resolved with the table so far, so `S=$HOME/.ssh; D=$S/id_rsa` is transitive.
-    assignmentTable.set(name, resolveWordLiteral(a.Value));
+    assignmentTable.set(name, { value: resolveWordLiteral(a.Value), at });
   }
 }
 
@@ -2331,7 +2373,9 @@ function resolveTrivialSubst(part: any): string | undefined {
  *  table has nothing to say (which lets the HOME default speak). */
 function recordedExpansion(name: string | undefined): string | null | undefined {
   if (!assignmentTable || !name) return undefined;
-  return assignmentTable.has(name) ? assignmentTable.get(name) : undefined;
+  const rec = assignmentTable.get(name);
+  if (rec === undefined || rec.at >= currentStmtOffset) return undefined;
+  return rec.value;
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isPlainParam(p: any): boolean {
@@ -2366,48 +2410,58 @@ function resolveWordLiteral(w: any): string | null {
   const parts: any[] = w?.Parts || [];
   let s = '';
   for (const p of parts) {
-    const t = syntax.NodeType(p);
-    if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
-    else if (t === 'SglQuoted') s += p.Value ?? '';
-    else if (t === 'ParamExp' && expandPlainParam(p) !== undefined) {
-      const e = expandPlainParam(p);
-      if (e === null) return null; // assigned to something unknowable
-      s += e;
-    } else if (t === 'CmdSubst' && assignmentTable && resolveTrivialSubst(p) !== undefined) {
-      // Only inside a jail walk, like variable expansion: the normalizer must not
-      // rewrite command text on this account either.
-      s += resolveTrivialSubst(p) as string;
-    } else if (t === 'DblQuoted') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const inner: any[] = p.Parts || [];
-      // A plain `$HOME` or a recorded `$K` inside double quotes is the same value.
-      const expandable = (ip: any): boolean =>
-        syntax.NodeType(ip) === 'Lit' ||
-        expandPlainParam(ip) !== undefined ||
-        (assignmentTable !== null && resolveTrivialSubst(ip) !== undefined);
-      if (!inner.every(expandable)) return null;
-      if (
-        inner.some((ip: any) => syntax.NodeType(ip) === 'ParamExp' && expandPlainParam(ip) === null)
-      )
-        return null;
-      // Inside double quotes bash honours exactly four escapes: \$ \` \" \\.
-      // Dropping them left `eval "eval \"cat KEY\""` re-parsed with literal
-      // backslashes, so the inner wrapper was never read (stage 6, JAIL-1). `\.`
-      // and every other backslash stay as written, which is what a regex in
-      // double quotes needs.
-      s += inner
-        .map((ip: any) => {
-          const it = syntax.NodeType(ip);
-          if (it === 'ParamExp') return expandPlainParam(ip) as string;
-          if (it === 'CmdSubst') return resolveTrivialSubst(ip) as string;
-          return (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1');
-        })
-        .join('');
-    } else {
-      return null; // dynamic
-    }
+    const piece = resolvePart(p, false);
+    if (piece === undefined || piece === null) return null; // dynamic, or unknowable
+    s += piece;
   }
   return s;
+}
+
+/**
+ * One word PART, resolved once.
+ *
+ * `undefined` = dynamic (the caller gives up on the word), `null` = recorded as
+ * assigned to something unknowable (same outcome, kept distinct so the two
+ * reasons stay readable), a string = the literal text it contributes.
+ *
+ * ⚠️ Called exactly ONCE per part, on purpose. The first cut asked
+ * `expandPlainParam(p) !== undefined` and then called it again for the value, and
+ * inside double quotes ran `every` + `some` + `map` over the same parts, so each
+ * part resolved two or three times; since a trivial CmdSubst recurses back into
+ * resolveWordLiteral, that doubled per nesting level. Measured before the fix:
+ * `cat $(echo $(echo … KEY))` cost 12 ms at depth 4, 168 at 10 and 504 at 12,
+ * which is a hook-hot-path denial of service a crafted command could hand us
+ * (/code-review, stage 6).
+ *
+ * `inQuotes` carries the one behavioural difference: inside double quotes bash
+ * honours exactly four escapes, and dropping them is what lets a nested
+ * `eval "eval \"cat KEY\""` re-parse (JAIL-1). Like the two expansions, it is
+ * gated on the jail walk, because the NORMALIZER shares this resolver and its
+ * output is the text the regex rules and the historical scanner read.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
+  const t = syntax.NodeType(p);
+  if (t === 'Lit') {
+    const raw = p.Value ?? '';
+    if (!inQuotes) return raw.replace(/\\(.)/g, '$1');
+    return assignmentTable ? raw.replace(/\\([$`"\\])/g, '$1') : raw;
+  }
+  if (t === 'SglQuoted') return p.Value ?? '';
+  if (t === 'ParamExp') return expandPlainParam(p);
+  if (t === 'CmdSubst') return assignmentTable ? resolveTrivialSubst(p) : undefined;
+  if (t === 'DblQuoted' && !inQuotes) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inner: any[] = p.Parts || [];
+    let out = '';
+    for (const ip of inner) {
+      const piece = resolvePart(ip, true);
+      if (piece === undefined || piece === null) return piece;
+      out += piece;
+    }
+    return out;
+  }
+  return undefined; // dynamic
 }
 
 /**
@@ -2846,20 +2900,34 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   // inherits a copy of its parent's. Restored in `finally`, so a throw cannot
   // leak one command's variables into the next.
   const outerTable = assignmentTable;
+  const outerOffset = currentStmtOffset;
   assignmentTable = new Map(outerTable ?? []);
+  currentStmtOffset = Number.MAX_SAFE_INTEGER;
+  // Filled from UNCONDITIONAL TOP-LEVEL statements only, before the walk judges
+  // anything. Recording during the walk read assignments the shell may never run
+  // -- `if false; then HOME=$(mktemp -d); fi; cat $HOME/.ssh/id_rsa` recorded an
+  // unknowable HOME and the read went from block to ALLOW, a one-token undo of
+  // JAIL-15 (/code-review, stage 6). Same allowlist and same reasoning as
+  // collectSameCommandCreations: a statement inside `&&`/`||`, if/for/while/case,
+  // a subshell or a function body is control-flow dependent. Missing one leaves
+  // today's behaviour; honouring one the shell skips fails OPEN.
+  recordTopLevelAssignments(f);
   try {
     syntax.Walk(f, (node: unknown) => {
       if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
       const nodeType = syntax.NodeType(n);
-      // Stage 6: record `K=v`, `export K=v` and friends as the walk passes them,
-      // before any later CallExpr is judged. Prefix assignments are ignored inside.
-      if (nodeType === 'CallExpr' || nodeType === 'DeclClause') recordAssignments(n);
+
       // A redirect lives on the Stmt, not the CallExpr -- and `$(< X)` is a
       // Stmt whose Cmd is null, `while ...; done < X` a WhileClause. Judge the
       // redirect here, for any Cmd, then keep walking into the children.
       if (nodeType === 'Stmt') {
+        try {
+          currentStmtOffset = n.Pos().Offset();
+        } catch {
+          currentStmtOffset = Number.MAX_SAFE_INTEGER;
+        }
         // Keep the STRICTER of what we have and what this redirect says, and do
         // not stop the walk on a review: `cat KEY < ~/.npmrc` is one statement
         // whose redirect is a review-tier read and whose argv is a block-tier
@@ -2869,7 +2937,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         return result?.verdict !== 'block';
       }
       if (nodeType !== 'CallExpr') return true;
-      const { name, flags, paths, words, args } = extractLiteralArgs(n);
+      const { name, flags, paths, words } = extractLiteralArgs(n);
       if (!name) return true;
 
       // rm with -r and -f (any combination, e.g. -rf, -fr, -r -f)
@@ -2906,16 +2974,32 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       // is one literal word; the only honest treatment is to re-parse it, once.
       // A dynamic payload (ParamExp / CmdSubst) resolves to null and is left to
       // detectDangerousShellExec + the Class B evalDynamic knob.
-      // Stage 6 (JAIL-1): three levels, not one. `eval "eval \"cat KEY\""` and
-      // `sh -c "sh -c \"cat KEY\""` were ALLOW because exactly one wrapper was
-      // re-parsed; the bound was arbitrary and nobody had measured two. Three
-      // covers every shape in the exfil corpus and `sudo sh -c "bash -c '...'"`,
-      // and it STAYS a bound: a pathological nesting must not become a parse
-      // loop. The fourth level is pinned as the accepted limit in
-      // jail-nested-wrappers.spec.ts, verdict stated rather than hidden.
-      if (depth < 3) {
+      // Stage 6 (JAIL-1): `eval "eval \"cat KEY\""` was ALLOW because exactly one
+      // wrapper was re-parsed (`depth < 1`). The first fix raised it to a constant
+      // 3, which only moved the bypass to level 4 and was justified by a premise
+      // that is false: `literalShellPayload` always returns a STRICT SUBSTRING of
+      // its parent command, so the recursion terminates on its own. The bound is
+      // now that property, with a generous depth cap left only as a backstop
+      // against a parser that ever returns something non-shorter
+      // (/code-review, stage 6).
+      // A find ACTION can itself be a string-wrapped command: `find . -exec sh -c
+      // "cat KEY" \;` was ALLOW while the same `sh -c` alone blocked
+      // (/code-review, stage 6). Each action's payload is re-parsed the same way
+      // the command's own payload is, just below.
+      if (depth < 24 && name === 'find') {
+        for (const action of findActions(words, 0)) {
+          const h = unwrapCommandHead(action);
+          const inner = literalShellPayload(action.slice(h), baseWord(action[h]));
+          if (inner === null || inner.length >= command.length) continue;
+          const v = analyzeFsOperationImpl(inner, depth + 1);
+          result = stricter(result, v);
+          if (result?.verdict === 'block') return false;
+        }
+      }
+
+      if (depth < 24) {
         const payload = literalShellPayload(words, name);
-        if (payload !== null) {
+        if (payload !== null && payload.length < command.length) {
           const inner = analyzeFsOperationImpl(payload, depth + 1);
           if (inner) {
             result = inner;
@@ -2928,7 +3012,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
       // wrapper, or as find's -exec action.
       const readPaths = FS_READ_TOOLS.has(name)
-        ? [...readTargets(name, args, flags, words, 1), ...flagOperandFiles(name, words, 1)]
+        ? readerPaths(words, 0)
         : wrappedReadPaths(words, name);
       if (readPaths) {
         for (const p of readPaths) {
@@ -2951,6 +3035,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
     return null;
   } finally {
     assignmentTable = outerTable;
+    currentStmtOffset = outerOffset;
   }
 }
 
@@ -3099,7 +3184,24 @@ const FIND_OPTIONS = new Set(['-H', '-L', '-P']);
  */
 function findAction(words: (string | null)[], k: number): (string | null)[] {
   const end = words.findIndex((w, i) => i > k && (w === ';' || w === '+'));
-  return words.slice(k + 1, end < 0 ? words.length : end).filter((w) => w !== '{}');
+  // `{}` is KEPT, not dropped. Removing it changed the action's ARITY before the
+  // positional shape rules ran, so `find /tmp/d -exec cp KEY {} \;` became
+  // `cp KEY` -- one operand, `allButLast` yields no source, and the key was
+  // dropped while real find copies it onto every match (/code-review, stage 6).
+  // It is never a jailed path, so keeping it costs nothing and preserves the
+  // destination slot the copy tier reasons about.
+  return words.slice(k + 1, end < 0 ? words.length : end);
+}
+
+/** Every `-exec` action in the command, not just the first: `find . -exec true
+ *  {} \; -exec cat KEY \;` hid its second action behind its first. */
+function findActions(words: (string | null)[], h: number): (string | null)[][] {
+  const out: (string | null)[][] = [];
+  for (let i = h + 1; i < words.length; i++) {
+    const w = words[i];
+    if (w !== null && FIND_EXEC_FLAGS.has(w)) out.push(findAction(words, i));
+  }
+  return out;
 }
 
 function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
@@ -3132,14 +3234,18 @@ function copySourcePaths(words: (string | null)[]): string[] {
   if (fi >= 0) {
     const { k, starts } = findStartPoints(words, fi);
     if (k < 0) return [];
-    const action = findAction(words, k);
-    const head = unwrapCommandHead(action);
-    // The start points are copied only when the action IS a copy verb; the
-    // action's own literal sources are judged either way (stage 6, JAIL-11:
-    // `find . -exec cp KEY /tmp/k \;` was ALLOW). The slice has no `find` in it,
-    // so the recursion takes the ordinary path.
-    const own = resolveCopyShape(action, head) ? copySourcePaths(action) : [];
-    return resolveCopyShape(action, head) ? [...starts, ...own] : own;
+    // Stage 6 (JAIL-11): `find . -exec cp KEY /tmp/k ;` was ALLOW because only
+    // the start points were judged. EVERY -exec action is judged now, not just
+    // the first, and each slice has no `find` in it so the recursion takes the
+    // ordinary path. The start points join the sources only for an action that IS
+    // a copy verb; a reader action is the read tier's business.
+    const out: string[] = [];
+    for (const action of findActions(words, fi)) {
+      const h2 = unwrapCommandHead(action);
+      if (!resolveCopyShape(action, h2)) continue;
+      out.push(...starts, ...copySourcePaths(action));
+    }
+    return out;
   }
   // Cheap exit for the ~99% of CallExprs whose head is no copy verb.
   if (!COPY_VERB_HEADS.has(baseWord(words[h]))) return [];
@@ -3567,6 +3673,23 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
  * pattern is UNKNOWN to the table, slots cannot be counted past it and nothing is
  * excused; a flag after the pattern is irrelevant and does not suppress it.
  */
+/**
+ * Every path a reader whose head sits at `words[h]` opens: its own operands plus
+ * the files named by its value flags. The three tiers that ask this question --
+ * a direct read, a wrapped read, and find's -exec action -- had a copy each, and
+ * the pattern-slot work of stage 5 had to be applied to all three by hand. One
+ * definition, so a reader learned in one tier is learned in every tier.
+ */
+function readerPaths(words: (string | null)[], h: number): string[] {
+  const head = baseWord(words[h]);
+  const from = h + 1;
+  const flags = words.slice(from).filter((w): w is string => w !== null && w.startsWith('-'));
+  return [
+    ...readTargets(head, positionedArgs(words, from), flags, words, from),
+    ...flagOperandFiles(head, words, from),
+  ];
+}
+
 function readTargets(
   verb: string,
   args: PositionedArg[],
@@ -3737,28 +3860,23 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
     // and JAIL-10's `=` table never reached it. The action is the slice after
     // -exec up to `;` or `+`, with `{}` removed, and it gets exactly what an
     // ordinary command gets: unwrap the head, then the reader's own targets.
-    const action = findAction(words, k);
-    const h = unwrapCommandHead(action);
-    const head = baseWord(action[h]);
-    if (!isReaderWord(action[h] ?? null)) return null;
-    const rest = action.slice(h + 1);
-    const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
-    return [
-      ...starts,
-      ...readTargets(head, positionedArgs(action, h + 1), restFlags, action, h + 1),
-      ...flagOperandFiles(head, action, h + 1),
-    ];
+    // The start points are a READ only when an action reads them: `find DIR -exec
+    // cp {} /tmp/` is the copy tier's business and must stay a review, not become
+    // a block (it did, briefly, when this pushed `starts` unconditionally).
+    const paths: string[] = [];
+    let reads = false;
+    for (const action of findActions(words, 0)) {
+      const h = unwrapCommandHead(action);
+      if (!isReaderWord(action[h] ?? null)) continue;
+      reads = true;
+      paths.push(...readerPaths(action, h));
+    }
+    return reads ? [...starts, ...paths] : paths;
   }
   if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
   const h = unwrapCommandHead(words);
   if (h <= 0 || !isReaderWord(words[h] ?? null)) return null;
-  const head = baseWord(words[h]);
-  const rest = words.slice(h + 1);
-  const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
-  return [
-    ...readTargets(head, positionedArgs(words, h + 1), restFlags, words, h + 1),
-    ...flagOperandFiles(head, words, h + 1),
-  ];
+  return readerPaths(words, h);
 }
 
 /**

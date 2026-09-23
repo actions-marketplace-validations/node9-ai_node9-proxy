@@ -172,6 +172,15 @@ describe('JAIL-14a — HOME is an assignment like any other', () => {
     [`env HOME=/tmp/x cat $HOME/.ssh/id_rsa`, 'block'],
     // and it does not persist to the next statement either
     [`HOME=/tmp/x true; cat $HOME/.ssh/id_rsa`, 'block'],
+    // The HOME rows above cannot tell the guard apart on their own: every jail
+    // matcher judges the FILE, so `/tmp/x/.ssh/id_rsa` and `~/.ssh/id_rsa` both
+    // block. These three discriminate. A prefix assignment must not clobber a
+    // real earlier value (rows 1 and 3 go null without the guard), and it must
+    // not be honoured for its own command's words either, which is exactly what
+    // bash does: the words are expanded before the prefix takes effect.
+    [`K=${K}; K=/tmp/a cat $K`, 'block'],
+    [`K=${K}; K=/tmp/a true; cat $K`, 'block'],
+    [`K=/tmp/a; K=${K} cat $K`, 'null'],
     // a HOME made unknowable stays unknowable, rather than defaulting to `~`
     [`export HOME=$(mktemp -d); cat $HOME/.ssh/config`, 'null'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));

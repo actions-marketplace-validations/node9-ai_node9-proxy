@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { COPY_VERBS, analyzeFsOperation } from '../shell/index';
+import { COPY_VERBS, RSYNC_SKIP, VALUE_FLAGS, analyzeFsOperation } from '../shell/index';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGE 4: COPY VERBS, GUARDED BY POSITION
@@ -546,5 +546,17 @@ describe('stage 4 — non-goals, pinned as failing', () => {
   });
   it.fails('a copy of a copy is a taint question', () => {
     expect(v(`cp /tmp/k /tmp/k2`)).toBe(COPY_SSH);
+  });
+});
+
+describe("rsync: the copy tier's skip list cannot drift from the egress table", () => {
+  // Two tables name rsync flags that take an operand, for two tiers with opposite
+  // failure directions (see the comment on RSYNC_SKIP). They may differ in size,
+  // but a flag this tier skips and the egress tier does not would mean one of
+  // them is simply wrong about rsync. Derived, so adding a flag to either table
+  // is what moves this row, not editing the row.
+  it.each(RSYNC_SKIP)('%s is also a known value flag in the egress table', (f) => {
+    const spelled = f.startsWith('-') ? f : `-${f}`;
+    expect(VALUE_FLAGS.rsync.has(spelled)).toBe(true);
   });
 });
