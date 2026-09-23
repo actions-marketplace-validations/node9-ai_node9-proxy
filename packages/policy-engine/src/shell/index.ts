@@ -36,10 +36,35 @@ const MESSAGE_FLAGS = new Set([
   '--summary',
 ]);
 
-// Shell interpreters that accept a -c flag for inline command execution
-const SHELL_INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh']);
-// Remote download tools whose presence in a CmdSubst is high-confidence malicious
-const DOWNLOAD_CMDS = new Set(['curl', 'wget']);
+// Shell interpreters that accept a -c flag for inline command execution.
+// The PowerShell entries were absent until 2026-09-22: `iwr … | iex` — the
+// canonical Windows form of `curl | sh` — was allowed while its POSIX twin
+// blocked. Exported so the two regex copies of the pipe-to-shell rule
+// (DEFAULT_CONFIG and bash-safe.json) can be pinned against THIS list
+// (pipe-to-shell-vocabulary-drift.spec.ts) instead of drifting from it.
+export const SHELL_INTERPRETERS = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'fish',
+  'dash',
+  'ksh',
+  'iex',
+  'invoke-expression',
+  'powershell',
+  'pwsh',
+]);
+// Remote download tools whose presence in a CmdSubst is high-confidence
+// malicious. PowerShell's curl/wget ARE aliases of Invoke-WebRequest, so the
+// spelled-out cmdlets and their short aliases belong here with them.
+export const DOWNLOAD_CMDS = new Set([
+  'curl',
+  'wget',
+  'iwr',
+  'invoke-webrequest',
+  'irm',
+  'invoke-restmethod',
+]);
 
 /**
  * True when a node is either a plain Lit, or a CmdSubst whose only command is
@@ -513,6 +538,20 @@ export const FS_READ_TOOLS = new Set([
   'tac',
   'nl',
   'dd',
+  // — PowerShell, absent until 2026-09-22 —
+  // Same membership test, "does it emit file contents": Get-Content/gc print
+  // the file (cat), Select-String/sls print matching lines (grep), Format-Hex
+  // dumps bytes (xxd), Import-Csv/Import-Clixml parse and print (jq). Every
+  // one of these read a credential file with no verdict while its POSIX twin
+  // blocked. Lowercase on purpose: PowerShell is case-insensitive and the
+  // prescreen folds case, so `Get-Content` and `GET-CONTENT` both land here.
+  'get-content',
+  'gc',
+  'select-string',
+  'sls',
+  'format-hex',
+  'import-csv',
+  'import-clixml',
 ]);
 
 // ── JAIL-10: a flag whose OPERAND IS A FILE THE VERB OPENS ──────────────────
@@ -2010,6 +2049,12 @@ export interface ShellDestination {
 // Exported: the orchestrator's isNetworkTool is built from THIS set, so the two
 // lists cannot drift (they had: `rsync` was in the regex and not here).
 export const NET_BINARIES = new Set([
+  // PowerShell downloaders (2026-09-22). `Invoke-WebRequest -InFile creds`
+  // is the same exfil as `curl -d @creds` and was invisible to isNetworkTool.
+  'iwr',
+  'invoke-webrequest',
+  'irm',
+  'invoke-restmethod',
   'curl',
   'wget',
   'scp',
