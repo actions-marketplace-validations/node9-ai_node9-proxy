@@ -221,7 +221,12 @@ export function fullPathCommand(
   // Windows keeps `node "<cli.js>"`: `node` is a PATH lookup there and the
   // cli.js path lives under the npm prefix, so it is already upgrade-stable.
   ensureHookShim(home, nodeExec, cliScript);
-  return `"${hookShimPath(home)}" ${subcommand}`;
+  // Forward slashes: this string is a POSIX shell command, and it must not
+  // depend on the separator the HOST happens to use. path.join on a Windows
+  // test runner yields backslashes, which would make the emitted command vary
+  // by who ran the build -- the same environment-dependence that made the
+  // pre-#185 rows pass on Linux by accident.
+  return `"${toForwardSlashes(hookShimPath(home))}" ${subcommand}`;
 }
 
 // ── Hook shim ──────────────────────────────────────────────────────────────────

@@ -129,7 +129,9 @@ describe('fullPathCommand', () => {
     // The command in the agent's config is the shim's fixed path, quoted.
     // node + cli.js live INSIDE the shim, where changing them changes nothing
     // an agent has trusted.
-    expect(fullPathCommand('check', 'linux', home)).toBe(`"${home}/.node9/bin/hook" check`);
+    expect(fullPathCommand('check', 'linux', home)).toBe(
+      `"${hookShimPath(home).replace(/\\/g, '/')}" check`
+    );
     expect(fs.readFileSync(path.join(home, '.node9', 'bin', 'hook'), 'utf-8')).toBe(
       hookShimBody('/usr/bin/node', '/home/u/.npm-global/lib/node_modules/node9-ai/dist/cli.js')
     );
@@ -146,7 +148,9 @@ describe('fullPathCommand', () => {
     );
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9 shim space '));
     // The shim path itself is quoted, so a $HOME with a space still survives.
-    expect(fullPathCommand('log', 'linux', home)).toBe(`"${home}/.node9/bin/hook" log`);
+    expect(fullPathCommand('log', 'linux', home)).toBe(
+      `"${hookShimPath(home).replace(/\\/g, '/')}" log`
+    );
     // And the space-bearing node path is quoted INSIDE the shim.
     expect(fs.readFileSync(path.join(home, '.node9', 'bin', 'hook'), 'utf-8')).toContain(
       'exec "/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" "/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" "$@"'
@@ -165,7 +169,11 @@ describe('fullPathCommand', () => {
     // A node upgrade changes only the body — the path agents trusted is intact.
     expect(ensureHookShim(home, '/usr/bin/node-v23', '/opt/node9/dist/cli.js')).toBe(true);
     expect(fs.readFileSync(shim, 'utf-8')).toContain('"/usr/bin/node-v23"');
-    expect(fs.statSync(shim).mode & 0o111).not.toBe(0); // executable
+    // POSIX only: Windows has no executable bit, and the shim is a POSIX-branch
+    // artifact anyway. Asserting it there measured the host, not the code.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(shim).mode & 0o111).not.toBe(0);
+    }
     fs.rmSync(home, { recursive: true, force: true });
   });
 
