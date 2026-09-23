@@ -204,14 +204,51 @@ describe('JAIL-14a — the table survives a wrapper and an && chain', () => {
     [`K=${K} && cat $K`, 'block'],
     [`K=${K} || cat $K`, 'block'],
     [`K=$HOME/.env && grep -q x $K`, 'block'],
-    // the RIGHT operand is the conditional case, so it is not recorded. Here that
-    // keeps the earlier, jailed value: a false positive in a contrived shape,
-    // which is the direction this whole table fails in.
-    [`K=${K} && K=/tmp/a; cat $K`, 'block'],
+    // and with the right operand recorded, the LAST assignment wins here exactly
+    // as it does in the shell
+    [`K=${K} && K=/tmp/a; cat $K`, 'null'],
     [`false && K=${K}; cat $K`, 'null'],
     // a pipe is not an && chain: the left side assigns in a subshell
     [`K=${K} | cat; cat $K`, 'null'],
+    // The right operand of `&&` runs whenever the LEFT is a bare assignment, so
+    // it is recorded too. Skipping it let a benign left value overwrite an
+    // earlier jailed one and turned a block into ALLOW (second review round).
+    [`K=${K}; K=/tmp/a && K=${K}; cat $K`, 'block'],
+    [`K=/tmp/a && K=$HOME/.ssh/id_rsa && cat $K`, 'block'],
+    // a left operand that is a real command is still the conditional case
+    [`grep -q x f && K=/tmp/a; cat $K`, 'null'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+
+  it('a payload that regenerates itself returns, and still blocks', () => {
+    // `depth` bounds how DEEP the wrapper recursion goes, not how WIDE. With the
+    // assignment table resolving `$K` at every level, this branched once per
+    // wrapper statement per level and did not return inside two minutes -- a hook
+    // that never returns is the worst kind of fail-open. The budget and the memo
+    // of already-analysed payloads collapse it, without costing the verdict.
+    const bomb = (tail: string) => `K='sh -c "$K"; sh -c "$K"; ${tail}'; sh -c "$K"`;
+    const t0 = Date.now();
+    expect(v(bomb('cat /tmp/z'))).toBe('null');
+    expect(v(bomb(`cat ${K}`))).toBe('block');
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('an `&& true` spine is linear, not quadratic, in its length', () => {
+    // Asking `isBareAssignment` for the left operand separately re-walked the
+    // whole left subtree at every level. One pass that returns bare-ness up the
+    // recursion took a 400-link spine from 1624ms to 102ms.
+    const spine = (n: number) => `cat ${K}${' && true'.repeat(n)}`;
+    const ms = (c: string) => {
+      const t0 = Date.now();
+      expect(v(c)).toBe('block');
+      return Date.now() - t0;
+    };
+    ms(spine(50));
+    const small = ms(spine(100));
+    const large = ms(spine(400));
+    // 4x the links must not cost 16x the time. Generous, so a slow machine does
+    // not make this flake; the quadratic shape was 10x over this bound.
+    expect(large).toBeLessThan(Math.max(small * 8, 400));
+  });
 });
 
 describe('JAIL-14a — what the table must NOT do', () => {

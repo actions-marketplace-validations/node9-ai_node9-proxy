@@ -2271,6 +2271,31 @@ let assignmentTable: Map<string, { value: string | null; at: number }> | null = 
  *  otherwise makes order stop mattering. */
 let currentStmtOffset = Number.MAX_SAFE_INTEGER;
 
+/**
+ * The wrapper recursion is bounded by WORK, not only by nesting. `depth` bounds
+ * how DEEP it goes; it does not bound how WIDE, and each level re-parses one
+ * payload per wrapper statement, so a payload that carries several wrappers
+ * branches. With the assignment table resolving `$K` at every level,
+ * `K='sh -c "$K"; sh -c "$K"; cat /tmp/z'; sh -c "$K"` did not return inside two
+ * minutes (/code-review, stage 6). A hook that never returns is the worst kind
+ * of fail-open, so the top-level call gives the whole walk a budget of re-parses
+ * and a memo of the payloads already analysed; the branching vector repeats one
+ * payload string, so the memo alone collapses it.
+ */
+const PAYLOAD_BUDGET = 96;
+let payloadBudget = 0;
+let seenPayloads: Set<string> | null = null;
+
+/** True when the payload may be re-parsed: not seen before, and within budget. */
+function claimPayload(payload: string): boolean {
+  if (!seenPayloads) return true;
+  if (seenPayloads.has(payload)) return false;
+  if (payloadBudget <= 0) return false;
+  payloadBudget--;
+  seenPayloads.add(payload);
+  return true;
+}
+
 const ASSIGNMENT_HEADS = new Set(['export', 'declare', 'local', 'readonly', 'typeset']);
 
 /**
@@ -2305,19 +2330,33 @@ const AND_OR_OPS: Set<number> = (() => {
   return ops;
 })();
 
+/**
+ * Record one top-level statement's assignments. Returns whether the statement is
+ * a BARE ASSIGNMENT (`K=v`, `export K=v`, or an `&&`/`||` chain of them), which
+ * is the one shape that exits 0 unconditionally, so whatever follows it on the
+ * chain runs too.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function recordTopLevelStmt(stmt: any): void {
-  if (!stmt || !stmt.Cmd) return;
+function recordTopLevelStmt(stmt: any): boolean {
+  if (!stmt || !stmt.Cmd) return false;
   const t = syntax.NodeType(stmt.Cmd);
   // The LEFT operand of `&&` and `||` always runs, and a bare assignment always
   // exits 0, so `K=KEY && cat $K` is not control-flow dependent at all. Only the
   // left side: the right one is exactly the conditional case this excludes. A
   // pipe is deliberately not here -- `K=v | cat` assigns in a subshell.
   if (t === 'BinaryCmd') {
-    if (AND_OR_OPS.has(stmt.Cmd.Op)) recordTopLevelStmt(stmt.Cmd.X);
-    return;
+    if (!AND_OR_OPS.has(stmt.Cmd.Op)) return false;
+    // The right operand runs whenever the left is a bare assignment, because an
+    // assignment always exits 0 -- and if it is not recorded, a benign left value
+    // (`K=/tmp/a && K=KEY`) is the last one seen and OVERWRITES an earlier jailed
+    // one, which is a block turned into ALLOW (/code-review, stage 6). A left
+    // operand that is a real command is the conditional case and stops here.
+    // Bare-ness comes back UP from the recursion rather than being asked for
+    // separately: asking made a `&& true` spine quadratic in its length.
+    if (!recordTopLevelStmt(stmt.Cmd.X)) return false;
+    return recordTopLevelStmt(stmt.Cmd.Y);
   }
-  if (t !== 'CallExpr' && t !== 'DeclClause') return;
+  if (t !== 'CallExpr' && t !== 'DeclClause') return false;
   let at = 0;
   try {
     at = stmt.Pos().Offset();
@@ -2325,6 +2364,8 @@ function recordTopLevelStmt(stmt: any): void {
     at = 0;
   }
   recordAssignments(stmt.Cmd, at);
+  if (t === 'DeclClause') return ASSIGNMENT_HEADS.has(stmt.Cmd.Variant?.Value ?? '');
+  return (stmt.Cmd.Args || []).length === 0 && (stmt.Cmd.Assigns || []).length > 0;
 }
 
 /** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
@@ -2932,6 +2973,12 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   // leak one command's variables into the next.
   const outerTable = assignmentTable;
   const outerOffset = currentStmtOffset;
+  const outerSeen = seenPayloads;
+  const outerBudget = payloadBudget;
+  if (depth === 0) {
+    seenPayloads = new Set();
+    payloadBudget = PAYLOAD_BUDGET;
+  }
   // Inherited entries are rebased to -1: their offsets are positions in the
   // PARENT string and would be compared against the child's, which hid every
   // inherited value from the child's first statement
@@ -3027,7 +3074,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         for (const action of findActions(words, 0)) {
           const h = unwrapCommandHead(action);
           const inner = literalShellPayload(action.slice(h), baseWord(action[h]));
-          if (inner === null) continue;
+          if (inner === null || !claimPayload(inner)) continue;
           const v = analyzeFsOperationImpl(inner, depth + 1);
           result = stricter(result, v);
           if (result?.verdict === 'block') return false;
@@ -3040,7 +3087,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         // (`K=KEY; sh -c "cat $K $K"`) and the wrapper then went unread. `depth`
         // is the bound; the parse cache keys on the normalised string.
         const payload = literalShellPayload(words, name);
-        if (payload !== null) {
+        if (payload !== null && claimPayload(payload)) {
           const inner = analyzeFsOperationImpl(payload, depth + 1);
           if (inner) {
             result = inner;
@@ -3077,6 +3124,8 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   } finally {
     assignmentTable = outerTable;
     currentStmtOffset = outerOffset;
+    seenPayloads = outerSeen;
+    if (depth === 0) payloadBudget = outerBudget;
   }
 }
 
