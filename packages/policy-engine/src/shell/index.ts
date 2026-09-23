@@ -2157,6 +2157,34 @@ const VALUE_FLAGS: Record<string, Set<string>> = {
 // (param/command/arithmetic expansion) — we must not treat dynamic content as a
 // host, but a dynamic flag-VALUE must still consume its flag's skip slot.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * JAIL-15 (stage 6, step 1): the variables that NAME THE HOME DIRECTORY. A
+ * ParamExp is "dynamic" to this resolver, and a dynamic word occupies no slot,
+ * so `cat $HOME/.ssh/id_rsa` was ALLOW while `cat ~/.ssh/id_rsa` blocked --
+ * measured at the real gate on 2.20.0, for all three jail rules and for the copy
+ * tier too. Two spellings of one path, and the difference is invisible to whoever
+ * wrote it; `$HOME` is how engineers write paths, so an agent emits it with no
+ * intent to evade.
+ *
+ * `$HOME` is not unknowable: mvdan hands over the NAME, and `~` is a spelling of
+ * the same place that every rule already matches. So a PLAIN expansion of one of
+ * these names contributes `~`, and every tier that calls this resolver inherits
+ * it from this one line. A MODIFIED expansion (`${HOME:-/tmp}`, `${HOME%/}`,
+ * `${#HOME}`, `${HOME[0]}`, `${!HOME}`) is not the plain home and stays dynamic.
+ *
+ * The one assumption fails SAFE: a command that reassigns HOME first is expanded
+ * wrongly, toward judging a path that is not the real home -- a false positive,
+ * never a bypass. Design: doc/jail-stage6-open-gaps-design.md, 3.1.
+ */
+const HOME_VARIABLES = new Set(['HOME', 'USERPROFILE']);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function plainHomeExpansion(p: any): boolean {
+  if (syntax.NodeType(p) !== 'ParamExp') return false;
+  if (!HOME_VARIABLES.has(p.Param?.Value)) return false;
+  // Any modifier means the value is computed, not the home directory itself.
+  return !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
+}
+
 function resolveWordLiteral(w: any): string | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parts: any[] = w?.Parts || [];
@@ -2165,11 +2193,16 @@ function resolveWordLiteral(w: any): string | null {
     const t = syntax.NodeType(p);
     if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
     else if (t === 'SglQuoted') s += p.Value ?? '';
+    else if (plainHomeExpansion(p)) s += '~';
     else if (t === 'DblQuoted') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inner: any[] = p.Parts || [];
-      if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit')) return null;
-      s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
+      // A plain `$HOME` inside double quotes is the same home directory.
+      if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit' || plainHomeExpansion(ip)))
+        return null;
+      s += inner
+        .map((ip: { Value?: string }) => (plainHomeExpansion(ip) ? '~' : (ip.Value ?? '')))
+        .join('');
     } else {
       return null; // dynamic
     }
