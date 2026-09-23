@@ -442,7 +442,12 @@ export const DEFAULT_CONFIG: Config = {
             op: 'matches',
             // Anchor curl/wget as a shell command so node -e scripts testing this
             // regex pattern don't self-match as a false positive.
-            value: '(^|&&|\\|\\||;)\\s*(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
+            // Downloader and sink groups mirror the engine's DOWNLOAD_CMDS and
+            // SHELL_INTERPRETERS; pipe-to-shell-vocabulary-drift.spec.ts fails if
+            // either list gains a name this regex does not. The PowerShell sinks
+            // carry \b so `iex` cannot match inside e.g. `iexplore`.
+            value:
+              '(^|&&|\\|\\||;)\\s*(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)[^|]*\\|\\s*(?:(ba|z|da|fi|c|k)?sh|(?:iex|invoke-expression|powershell|pwsh)\\b)',
             flags: 'i',
           },
         ],

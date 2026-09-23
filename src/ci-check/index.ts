@@ -8,7 +8,7 @@ import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import { analyzeInstructionFile } from './instructions';
+import { analyzeInstructionFile, INSTRUCTION_FILE_RE } from './instructions';
 import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
@@ -43,11 +43,7 @@ export function scanTree(tree: RepoTree): ScanResult {
         findings.push(...analyzeMcp(file.path, file.content));
       } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
         findings.push(...analyzeCodexConfig(file.path, file.content)); // CI-3 + CI-1 (1c-A)
-      } else if (
-        /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|copilot-instructions\.md$|(^|\/)\.(windsurf|cline)rules$/.test(
-          file.path
-        )
-      ) {
+      } else if (INSTRUCTION_FILE_RE.test(file.path)) {
         findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6
       }
     } catch (err) {

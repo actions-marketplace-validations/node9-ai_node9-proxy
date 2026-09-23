@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*(curl|wget)\\s+[^|]*\\|\\s*(?:(bash|sh|zsh|fish)|(python3?|ruby|perl|node)\\b(?!\\s+-[cem]\\b))",
+          "value": "(^|&&|\\|\\||;)\\s*(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\\s+[^|]*\\|\\s*(?:(bash|sh|zsh|fish|dash|ksh|iex|invoke-expression|powershell|pwsh)|(python3?|ruby|perl|node)\\b(?!\\s+-[cem]\\b))",
           "flags": "i"
         }
       ],
