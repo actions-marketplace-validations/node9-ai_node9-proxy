@@ -536,8 +536,13 @@ describe('stage 4 — non-goals, pinned as failing', () => {
   it.fails('a relative segment after tar -C escapes the rooted matcher', () => {
     expect(v(`tar cf /tmp/s.tar -C /home/u .ssh`)).toBe(COPY_SSH);
   });
-  it.fails('a dynamic source is unknowable at this layer', () => {
+  // Flipped 2026-09-23: stage 6 (JAIL-14, half one) follows a value assigned
+  // earlier in the same command, so this non-goal now passes on purpose. A
+  // source that is dynamic for a reason the command does not contain
+  // (`cp $F /tmp/x` alone) is still unknowable and stays null.
+  it('a source assigned earlier in the command is followed', () => {
     expect(v(`F=${K}; cp $F /tmp/x`)).toBe(COPY_SSH);
+    expect(v(`cp $F /tmp/x`)).toBeNull();
   });
   it.fails('a copy of a copy is a taint question', () => {
     expect(v(`cp /tmp/k /tmp/k2`)).toBe(COPY_SSH);

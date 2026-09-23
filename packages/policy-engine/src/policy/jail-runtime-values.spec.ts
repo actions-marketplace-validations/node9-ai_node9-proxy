@@ -95,3 +95,103 @@ describe('JAIL-15 — what the expansion must NOT do', () => {
     expect(v(`grep -rn foo $HOME/.ssh/config`)).toBe('block');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGE 6, STEP 5: A PER-COMMAND ASSIGNMENT TABLE (JAIL-14, half one)
+//
+// `K=~/.ssh/id_rsa; cat $K` was ALLOW. The value is knowable, it is one
+// statement to the left in the same command string the hook sees, but the engine
+// judged one CallExpr at a time and nobody followed it. Now every standalone
+// assignment (`K=v`, `export K=v`, `declare/local/readonly/typeset K=v`) is
+// recorded as the walk passes it, values resolved with the table so far (so it
+// is transitive), and a plain `$K` later in the same command contributes the
+// recorded value. Last assignment wins; a value that resolves to nothing makes
+// the name unknown again.
+//
+// Two rules the corpus forced, both about HOME:
+//   - `HOME=` is an assignment like any other, and the recorded value OVERRIDES
+//     the `~` default of step 1: `HOME=/tmp/fake; cat $HOME/.ssh/id_rsa` is a
+//     test-fixture idiom and must run.
+//   - a PREFIX assignment (`HOME=/tmp/x cat $HOME/...`) does not touch its own
+//     command's words: bash expands them with the OLD value first. So the read
+//     is real, `~` is the right expansion, and prefix assignments are ignored.
+//
+// Scope is the one command string; a value assigned in an earlier command, a
+// sourced file or the environment is not visible and is not claimed.
+// Substituting a recorded literal can only ADD judged words, so a wrong entry
+// is a false positive and a missed one is today's behaviour. Design: 3.2, 3.11.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const K = '/home/u/.ssh/id_rsa';
+
+describe('JAIL-14a — a value assigned earlier in the same command is followed', () => {
+  it.each([
+    [`K=${K}; cat $K`, 'block'],
+    [`K=~/.ssh/id_rsa; cat $K`, 'block'],
+    [`export K=${K}; cat $K`, 'block'],
+    [`declare F=$HOME/.env; cat $F`, 'block'],
+    [`local L=${K}; cat $L`, 'block'],
+    [`readonly R=${K}; cat $R`, 'block'],
+    [`typeset T=${K}; cat $T`, 'block'],
+    [`export F=~/.env; base64 $F`, 'block'],
+    // transitive, and inside a word
+    [`S=$HOME/.ssh; D=$S/id_rsa; cat $D`, 'block'],
+    [`P=.ssh/id_rsa; cat $HOME/$P`, 'block'],
+    // the copy tier follows it too
+    [`K=${K}; cp $K /tmp/k`, 'review'],
+    [`D=$HOME/.ssh; tar czf /tmp/s.tgz $D`, 'review'],
+    // last assignment wins
+    [`K=/tmp/a; K=${K}; cat $K`, 'block'],
+    [`K=${K}; K=/tmp/a; cat $K`, 'null'],
+    // a value that is itself dynamic makes the name unknown
+    [`K=$(cat x); cat $K`, 'null'],
+    [`K=${K}; K=$(cat x); cat $K`, 'null'],
+    // the pattern slot still works on a resolved word
+    [`F=notes.txt; grep .env $F`, 'null'],
+    [`F=${K}; grep foo $F`, 'block'],
+    // order matters: an assignment AFTER the use is not seen by it
+    [`cat $K; K=${K}`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+describe('JAIL-14a — HOME is an assignment like any other', () => {
+  it.each([
+    // a reassigned HOME overrides the `~` default. The resolved path is then
+    // `/tmp/fake/.ssh/id_rsa`, and the shipped matcher judges a FILE inside a
+    // `.ssh/` directory wherever it lives (`cat /tmp/fake/.ssh/id_rsa` blocks
+    // today, without any variable), so these still block -- on the fixture path,
+    // not on the real home. The discriminating rows are the next two.
+    [`HOME=/tmp/fake; cat $HOME/.ssh/id_rsa`, 'block'],
+    [`export HOME=/tmp/fake; cat $HOME/.ssh/id_rsa`, 'block'],
+    // the recorded value is what gets judged: a fixture home with an ordinary
+    // file is not the real home's credential
+    [`HOME=/tmp/fake; cat $HOME/id_rsa`, 'null'],
+    [`export HOME=/srv/app; cat $HOME/config/.env.example`, 'null'],
+    // a PREFIX assignment does not touch its own command's words
+    [`HOME=/tmp/x cat $HOME/.ssh/id_rsa`, 'block'],
+    [`env HOME=/tmp/x cat $HOME/.ssh/id_rsa`, 'block'],
+    // and it does not persist to the next statement either
+    [`HOME=/tmp/x true; cat $HOME/.ssh/id_rsa`, 'block'],
+    // a HOME made unknowable stays unknowable, rather than defaulting to `~`
+    [`export HOME=$(mktemp -d); cat $HOME/.ssh/config`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+describe('JAIL-14a — what the table must NOT do', () => {
+  it.each([
+    // a bare assignment is not a read
+    [`export AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials`, 'null'],
+    [`export PATH=$HOME/bin:$PATH`, 'null'],
+    [`K=${K}`, 'null'],
+    // legitimate use of a recorded value
+    [`KEYFILE=$HOME/.ssh/deploy_key; ssh -i $KEYFILE host uptime`, 'null'],
+    [`D=$HOME/project; cd $D && npm test`, 'null'],
+    [`CFG=$HOME/.config/app/config.toml; cat $CFG`, 'null'],
+    [`SSH_DIR=$HOME/.ssh; mkdir -p $SSH_DIR && cp id_ci $SSH_DIR/id_ci`, 'null'],
+    // an output redirect target is never a read, resolved or not
+    [`echo x > $HOME/.ssh/id_rsa`, 'null'],
+    [`K=${K}; echo x > $K`, 'null'],
+    // an append (`+=`) is not followed
+    [`K=/tmp; K+=/.ssh/id_rsa; cat $K`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});

@@ -2231,12 +2231,87 @@ const VALUE_FLAGS: Record<string, Set<string>> = {
  * never a bypass. Design: doc/jail-stage6-open-gaps-design.md, 3.1.
  */
 const HOME_VARIABLES = new Set(['HOME', 'USERPROFILE']);
+
+/**
+ * Stage 6, step 5 (JAIL-14, half one): the assignments seen so far in the ONE
+ * command string being judged. `K=~/.ssh/id_rsa; cat $K` was ALLOW because the
+ * engine judged one CallExpr at a time and nobody followed a value one statement
+ * to the left. The walk in analyzeFsOperationImpl records every STANDALONE
+ * assignment as it passes it, and a plain `$K` later in the command contributes
+ * the recorded value. A recorded `null` means "assigned, but to something
+ * unknowable", which makes the name unknown again rather than falling back to a
+ * default -- so `export HOME=$(mktemp -d); cat $HOME/.ssh/config` is not judged
+ * as the real home.
+ *
+ * Scope is the single command the hook received; nothing from an earlier command,
+ * a sourced file or the environment is claimed. Substituting a recorded literal
+ * can only ADD judged words, so a wrong entry is a false positive and a missed
+ * one is today's behaviour. Set and restored around each walk; a nested payload
+ * walk inherits a copy, which over-inherits (a non-exported variable would not
+ * reach a child shell) in the safe direction.
+ */
+let assignmentTable: Map<string, string | null> | null = null;
+
+const ASSIGNMENT_HEADS = new Set(['export', 'declare', 'local', 'readonly', 'typeset']);
+
+/** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
+ *  (`HOME=/tmp/x cat $HOME/...`, Args present) are ignored on purpose: bash
+ *  expands that command's own words with the OLD value, so the read is real and
+ *  the default expansion is the right one; and they do not persist. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function plainHomeExpansion(p: any): boolean {
+function recordAssignments(n: any): void {
+  if (!assignmentTable) return;
+  const t = syntax.NodeType(n);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let assigns: any[] = [];
+  if (t === 'CallExpr') {
+    if ((n.Args || []).length > 0) return; // a prefix assignment, not a statement
+    assigns = n.Assigns || [];
+  } else if (t === 'DeclClause') {
+    if (!ASSIGNMENT_HEADS.has(n.Variant?.Value ?? '')) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assigns = (n.Args || []).filter((a: any) => syntax.NodeType(a) === 'Assign');
+  } else return;
+  for (const a of assigns) {
+    const name: string | undefined = a?.Name?.Value;
+    if (!name || !a.Value || a.Append) continue; // `export K` and `K+=x` are not followed
+    // Resolved with the table so far, so `S=$HOME/.ssh; D=$S/id_rsa` is transitive.
+    assignmentTable.set(name, resolveWordLiteral(a.Value));
+  }
+}
+
+/** The recorded value for a plain expansion of `name`, or undefined when the
+ *  table has nothing to say (which lets the HOME default speak). */
+function recordedExpansion(name: string | undefined): string | null | undefined {
+  if (!assignmentTable || !name) return undefined;
+  return assignmentTable.has(name) ? assignmentTable.get(name) : undefined;
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isPlainParam(p: any): boolean {
   if (syntax.NodeType(p) !== 'ParamExp') return false;
-  if (!HOME_VARIABLES.has(p.Param?.Value)) return false;
-  // Any modifier means the value is computed, not the home directory itself.
+  // Any modifier means the value is computed, not the variable itself.
   return !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
+}
+/**
+ * What a plain ParamExp contributes: the recorded assignment if the table has
+ * one (a recorded null is "unknown", returned as null), else `~` for a home
+ * variable, else undefined for "dynamic". The table is consulted FIRST so a
+ * reassigned HOME overrides the default.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function expandPlainParam(p: any): string | null | undefined {
+  // Variable expansion is a JAIL-WALK concern: the table exists only inside
+  // analyzeFsOperationImpl. The normalizer shares this resolver for quote
+  // de-obfuscation and runs BEFORE the walk with no table; letting it expand
+  // `$HOME` rewrote the command text to `~/...` so the walk never saw the
+  // variable, and a reassigned HOME could not override the default (measured:
+  // `HOME=/tmp/fake; cat $HOME/.ssh/id_rsa` judged `~/.ssh/id_rsa`). Outside a
+  // walk a ParamExp stays dynamic, exactly as before stage 6.
+  if (!assignmentTable) return undefined;
+  if (!isPlainParam(p)) return undefined;
+  const recorded = recordedExpansion(p.Param?.Value);
+  if (recorded !== undefined) return recorded;
+  return HOME_VARIABLES.has(p.Param?.Value) ? '~' : undefined;
 }
 
 function resolveWordLiteral(w: any): string | null {
@@ -2247,12 +2322,20 @@ function resolveWordLiteral(w: any): string | null {
     const t = syntax.NodeType(p);
     if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
     else if (t === 'SglQuoted') s += p.Value ?? '';
-    else if (plainHomeExpansion(p)) s += '~';
-    else if (t === 'DblQuoted') {
+    else if (t === 'ParamExp' && expandPlainParam(p) !== undefined) {
+      const e = expandPlainParam(p);
+      if (e === null) return null; // assigned to something unknowable
+      s += e;
+    } else if (t === 'DblQuoted') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inner: any[] = p.Parts || [];
-      // A plain `$HOME` inside double quotes is the same home directory.
-      if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit' || plainHomeExpansion(ip)))
+      // A plain `$HOME` or a recorded `$K` inside double quotes is the same value.
+      const expandable = (ip: any): boolean =>
+        syntax.NodeType(ip) === 'Lit' || expandPlainParam(ip) !== undefined;
+      if (!inner.every(expandable)) return null;
+      if (
+        inner.some((ip: any) => syntax.NodeType(ip) === 'ParamExp' && expandPlainParam(ip) === null)
+      )
         return null;
       // Inside double quotes bash honours exactly four escapes: \$ \` \" \\.
       // Dropping them left `eval "eval \"cat KEY\""` re-parsed with literal
@@ -2260,8 +2343,10 @@ function resolveWordLiteral(w: any): string | null {
       // and every other backslash stay as written, which is what a regex in
       // double quotes needs.
       s += inner
-        .map((ip: { Value?: string }) =>
-          plainHomeExpansion(ip) ? '~' : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')
+        .map((ip: any) =>
+          syntax.NodeType(ip) === 'ParamExp'
+            ? (expandPlainParam(ip) as string)
+            : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')
         )
         .join('');
     } else {
@@ -2703,12 +2788,20 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   const f = parseShared(command);
   if (f === PARSE_FAIL) return null;
   let result: FsOpVerdict | null = null;
+  // One assignment table per command string; a nested payload walk (depth > 0)
+  // inherits a copy of its parent's. Restored in `finally`, so a throw cannot
+  // leak one command's variables into the next.
+  const outerTable = assignmentTable;
+  assignmentTable = new Map(outerTable ?? []);
   try {
     syntax.Walk(f, (node: unknown) => {
       if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
       const nodeType = syntax.NodeType(n);
+      // Stage 6: record `K=v`, `export K=v` and friends as the walk passes them,
+      // before any later CallExpr is judged. Prefix assignments are ignored inside.
+      if (nodeType === 'CallExpr' || nodeType === 'DeclClause') recordAssignments(n);
       // A redirect lives on the Stmt, not the CallExpr -- and `$(< X)` is a
       // Stmt whose Cmd is null, `while ...; done < X` a WhileClause. Judge the
       // redirect here, for any Cmd, then keep walking into the children.
@@ -2802,6 +2895,8 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
     return result;
   } catch {
     return null;
+  } finally {
+    assignmentTable = outerTable;
   }
 }
 
