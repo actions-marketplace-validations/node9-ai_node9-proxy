@@ -47,7 +47,9 @@ function wordsOf(cmd: string): (string | null)[] {
       else if (t === 'DblQuoted') {
         const inner: any[] = p.Parts ?? [];
         if (!inner.every((ip: any) => syntax.NodeType(ip) === 'Lit' || plainHome(ip))) return null;
-        s += inner.map((ip: any) => (plainHome(ip) ? '~' : (ip.Value ?? ''))).join('');
+        s += inner
+          .map((ip: any) => (plainHome(ip) ? '~' : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')))
+          .join('');
       } else return null;
     }
     return s;

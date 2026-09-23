@@ -258,7 +258,10 @@ describe('jail reachability — non-goals, pinned as failing', () => {
   it('an absolute reader path under a wrapper', () => {
     expect(v(`env /bin/cat ${X}`)).toMatch(/^block:/);
   });
-  it.fails('depth 2', () => {
+  // Flipped 2026-09-23: stage 6 (JAIL-1) raised the string-wrapper bound from
+  // one level to three, so this pinned non-goal now passes on purpose. Kept as a
+  // positive row; the new bound is pinned in jail-nested-wrappers.spec.ts.
+  it('depth 2', () => {
     expect(v(`sh -c 'sh -c "cat ${X}"'`)).toMatch(/^block:/);
   });
 });

