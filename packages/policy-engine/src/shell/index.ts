@@ -2282,18 +2282,49 @@ const ASSIGNMENT_HEADS = new Set(['export', 'declare', 'local', 'readonly', 'typ
 function recordTopLevelAssignments(f: any): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const stmts: any[] = Array.isArray(f?.Stmts) ? f.Stmts : [];
-  for (const stmt of stmts) {
-    if (!stmt || !stmt.Cmd) continue;
-    const t = syntax.NodeType(stmt.Cmd);
-    if (t !== 'CallExpr' && t !== 'DeclClause') continue;
-    let at = 0;
+  for (const stmt of stmts) recordTopLevelStmt(stmt);
+}
+
+/**
+ * The operator numbers mvdan gives `&&` and `||`, read off the parser itself
+ * rather than written down, so a version that renumbers them cannot silently
+ * turn this into a pipe.
+ */
+const AND_OR_OPS: Set<number> = (() => {
+  const ops = new Set<number>();
+  for (const src of ['a && b', 'a || b']) {
     try {
-      at = stmt.Pos().Offset();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cmd: any = syntax.NewParser().Parse(src, 'probe')?.Stmts?.[0]?.Cmd;
+      if (cmd && syntax.NodeType(cmd) === 'BinaryCmd') ops.add(cmd.Op);
     } catch {
-      at = 0;
+      /* a parser that cannot parse `a && b` leaves the set empty, and this
+         degrades to the pre-existing behaviour: `&&` chains are not recorded. */
     }
-    recordAssignments(stmt.Cmd, at);
   }
+  return ops;
+})();
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function recordTopLevelStmt(stmt: any): void {
+  if (!stmt || !stmt.Cmd) return;
+  const t = syntax.NodeType(stmt.Cmd);
+  // The LEFT operand of `&&` and `||` always runs, and a bare assignment always
+  // exits 0, so `K=KEY && cat $K` is not control-flow dependent at all. Only the
+  // left side: the right one is exactly the conditional case this excludes. A
+  // pipe is deliberately not here -- `K=v | cat` assigns in a subshell.
+  if (t === 'BinaryCmd') {
+    if (AND_OR_OPS.has(stmt.Cmd.Op)) recordTopLevelStmt(stmt.Cmd.X);
+    return;
+  }
+  if (t !== 'CallExpr' && t !== 'DeclClause') return;
+  let at = 0;
+  try {
+    at = stmt.Pos().Offset();
+  } catch {
+    at = 0;
+  }
+  recordAssignments(stmt.Cmd, at);
 }
 
 /** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
@@ -2901,7 +2932,13 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   // leak one command's variables into the next.
   const outerTable = assignmentTable;
   const outerOffset = currentStmtOffset;
-  assignmentTable = new Map(outerTable ?? []);
+  // Inherited entries are rebased to -1: their offsets are positions in the
+  // PARENT string and would be compared against the child's, which hid every
+  // inherited value from the child's first statement
+  // (`K=KEY; sh -c 'cat $K'` went block -> ALLOW; /code-review, stage 6).
+  assignmentTable = new Map(
+    [...(outerTable ?? [])].map(([k, r]) => [k, { value: r.value, at: -1 }])
+  );
   currentStmtOffset = Number.MAX_SAFE_INTEGER;
   // Filled from UNCONDITIONAL TOP-LEVEL statements only, before the walk judges
   // anything. Recording during the walk read assignments the shell may never run
@@ -2911,8 +2948,8 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   // collectSameCommandCreations: a statement inside `&&`/`||`, if/for/while/case,
   // a subshell or a function body is control-flow dependent. Missing one leaves
   // today's behaviour; honouring one the shell skips fails OPEN.
-  recordTopLevelAssignments(f);
   try {
+    recordTopLevelAssignments(f);
     syntax.Walk(f, (node: unknown) => {
       if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2990,7 +3027,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         for (const action of findActions(words, 0)) {
           const h = unwrapCommandHead(action);
           const inner = literalShellPayload(action.slice(h), baseWord(action[h]));
-          if (inner === null || inner.length >= command.length) continue;
+          if (inner === null) continue;
           const v = analyzeFsOperationImpl(inner, depth + 1);
           result = stricter(result, v);
           if (result?.verdict === 'block') return false;
@@ -2998,8 +3035,12 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       }
 
       if (depth < 24) {
+        // No length test here. `payload.length < command.length` looked like a
+        // termination proof, but expansion can GROW the payload
+        // (`K=KEY; sh -c "cat $K $K"`) and the wrapper then went unread. `depth`
+        // is the bound; the parse cache keys on the normalised string.
         const payload = literalShellPayload(words, name);
-        if (payload !== null && payload.length < command.length) {
+        if (payload !== null) {
           const inner = analyzeFsOperationImpl(payload, depth + 1);
           if (inner) {
             result = inner;

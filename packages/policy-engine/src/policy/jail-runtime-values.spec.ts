@@ -186,6 +186,34 @@ describe('JAIL-14a — HOME is an assignment like any other', () => {
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
 });
 
+describe('JAIL-14a — the table survives a wrapper and an && chain', () => {
+  // Four fail-open defects found by the second /code-review round, each red
+  // before its fix:
+  it.each([
+    // the child command inherited the table with the PARENT's byte offsets, and
+    // compared them against its own, so every inherited value was invisible to
+    // the child's first statement. Inherited entries are rebased to -1.
+    [`K=${K}; sh -c 'cat $K'`, 'block'],
+    [`K=${K}; bash -c "cat $K"`, 'block'],
+    [`K=${K}; eval "cat $K"`, 'block'],
+    // a wrapper payload was only re-parsed when it was SHORTER than the command.
+    // Expansion can grow it, and the wrapper then went unread.
+    [`K=${K}; sh -c "cat $K $K"`, 'block'],
+    // the left operand of `&&` and `||` always runs, and a bare assignment always
+    // exits 0, so this was never control-flow dependent
+    [`K=${K} && cat $K`, 'block'],
+    [`K=${K} || cat $K`, 'block'],
+    [`K=$HOME/.env && grep -q x $K`, 'block'],
+    // the RIGHT operand is the conditional case, so it is not recorded. Here that
+    // keeps the earlier, jailed value: a false positive in a contrived shape,
+    // which is the direction this whole table fails in.
+    [`K=${K} && K=/tmp/a; cat $K`, 'block'],
+    [`false && K=${K}; cat $K`, 'null'],
+    // a pipe is not an && chain: the left side assigns in a subshell
+    [`K=${K} | cat; cat $K`, 'null'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
 describe('JAIL-14a — what the table must NOT do', () => {
   it.each([
     // a bare assignment is not a read
