@@ -7,6 +7,7 @@ import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { mcpUpstreamString } from './mcp-wrap';
 import { codexTrustInstruction } from './codex-trust';
+import { establishCodexTrust } from './codex-app-server';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { recordHookBaseline } from './daemon/hook-baseline';
@@ -2088,17 +2089,38 @@ export async function setupCodex(): Promise<void> {
   // Trust reminder must surface whenever hooks are installed — both on the
   // first-run success path AND on re-runs that don't change anything,
   // because a user who never trusted hooks the first time still needs to.
-  // "/hooks" was the wrong instruction for the desktop app, which has no hook
-  // review screen at all — trust can only be granted from the Codex TUI. The
-  // text now names a real place and says what is at stake (codex-trust.ts).
-  const printCodexTrustReminder = () => {
+  // Establish Codex trust for node9's own hooks, or say plainly that it did
+  // not happen. Codex runs a hook only once it is trusted, trust is keyed to
+  // the hook's content, and the desktop app offers no working way to grant it
+  // (its Hooks page renders "No hooks found"). So node9 asks Codex's own
+  // app-server to trust exactly the commands node9 wrote — never computing a
+  // hash, never selecting by pattern — and re-verifies before claiming it.
+  // See codex-app-server.ts and codex-auto-trust-design.md.
+  //
+  // This runs LAST: node9's own writeToml() calls above rewrite the whole of
+  // config.toml, and the trust write must be the final one, done by Codex.
+  // Any failure falls back to the manual instruction; init itself still
+  // succeeds, because the hooks ARE installed and MCP/network protection is
+  // already live — only shell gating waits on trust.
+  const ensureCodexTrust = async (): Promise<void> => {
+    const outcome = await establishCodexTrust([fullPathCommand('check'), fullPathCommand('log')]);
+    if (outcome.ok) {
+      console.log(chalk.green('  ✅ Trusted with Codex'));
+      return;
+    }
+    if (process.env.NODE9_DEBUG === '1') {
+      console.error(chalk.gray(`  [codex trust] ${outcome.reason}`));
+    }
+    console.log(chalk.yellow('  ⚠️  Could not establish trust with Codex automatically.'));
     console.log(chalk.yellow(codexTrustInstruction()));
   };
 
   if (!anythingChanged && serversToWrap.length === 0) {
     if (hooksInstalled) {
       console.log(chalk.blue('ℹ️  Codex hooks already installed.'));
-      printCodexTrustReminder();
+      // Re-running init must repair an untrusted install, so this path tries
+      // too. When everything is already trusted it writes nothing.
+      await ensureCodexTrust();
     } else {
       console.log(
         chalk.blue(
@@ -2112,9 +2134,7 @@ export async function setupCodex(): Promise<void> {
 
   if (anythingChanged) {
     console.log(chalk.green.bold('🛡️  Node9 hooks installed for Codex.'));
-    // Codex shows a "Hooks need review" prompt at startup and won't run any
-    // new/changed hook until the user trusts it via the /hooks reviewer.
-    printCodexTrustReminder();
+    await ensureCodexTrust();
     console.log(chalk.gray('    Restart Codex for changes to take effect.'));
     printDaemonTip();
   }

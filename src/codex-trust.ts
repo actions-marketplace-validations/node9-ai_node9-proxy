@@ -14,21 +14,30 @@
 //   09-22 15:15Z  hooks.json rewritten by `node9 init`
 //   after         33 tool calls, zero hook events
 //
-// Two facts shape everything below:
+// ⚠️ CORRECTED 2026-09-24. This header used to state two "facts" that turned
+// out to be wrong in the way that matters:
 //
-//   1. The hash is not ours to compute. Byte-identical commands under
-//      different matchers carry different hashes; 2562 canonicalisation
-//      attempts matched none of the stored values. openai/codex#21615 is open
-//      because integrators who reverse-engineer it break on every internal
-//      change. This module NEVER writes trust state.
+//   1. "The hash is not ours to compute." Still true — byte-identical commands
+//      under different matchers carry different hashes, and openai/codex#21615
+//      is open because integrators who reverse-engineer it break on every
+//      internal change. But we never NEEDED to compute it: `codex app-server`'s
+//      `hooks/list` returns `currentHash`, and `config/batchWrite` accepts it
+//      back. That is the path Codex's own TUI takes. codex-app-server.ts does
+//      exactly that from `node9 init`; this module still never writes trust.
 //
-//   2. The desktop app cannot grant trust. Its startup never calls
-//      hooks/list, and codex.exe has no `hooks` subcommand. The review screen
-//      ("New hook - review required" / "Trust all and continue") lives in the
-//      TUI. So the instruction node9 used to print — "run /hooks" — pointed at
-//      something desktop users do not have.
+//   2. "The desktop app cannot grant trust." Half true. It ships a Hooks
+//      settings page, but that page renders "No hooks found" while the
+//      app-server returns every hook (upstream bug U1), so in practice a
+//      desktop user has no working route. The TUI review screen works but
+//      means a terminal, a hashed binary path, and a screen nobody has seen.
 //
-// What node9 CAN do is observe the outcome. A Codex audit row newer than
+// Both were stated as reasons NOT to act. Recorded here so the next reader
+// does not rebuild the same wall.
+//
+// This module is now the FALLBACK and the reporting layer: when auto-trust
+// cannot run (no binary, RPC failure, protocol change), it prints the manual
+// instruction, and doctor/status still infer trust from files. What node9 can
+// always do is observe the outcome. A Codex audit row newer than
 // hooks.json proves the current hooks ran. Zero [hooks.state] entries proves
 // they were never reviewed. Everything in between is "not observed", and it
 // is reported as exactly that — never as a green tick.
@@ -39,6 +48,7 @@ import os from 'os';
 import { spawnSync } from 'child_process';
 import { parse as parseToml } from 'smol-toml';
 import { locatorCommand } from './utils/platform-shell';
+import { findCodexBinary } from './codex-app-server';
 
 export type CodexTrustState =
   /** [features].hooks = false in config.toml — hooks.json is dormant regardless of trust. */
@@ -165,17 +175,14 @@ export function findCodexTui(env: NodeJS.ProcessEnv = process.env): string | nul
   } catch {
     // locator missing — fall through
   }
-  if (process.platform === 'win32' && env.LOCALAPPDATA) {
-    const binDir = path.join(env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin');
-    try {
-      for (const d of fs.readdirSync(binDir)) {
-        const exe = path.join(binDir, d, 'codex.exe');
-        if (fs.existsSync(exe)) return `"${exe}"`;
-      }
-    } catch {
-      // no bundled binary
-    }
-  }
+  // One lookup, not two. This used to scan the hashed build dirs itself and
+  // return the FIRST one readdir handed back — which on 2026-09-23 pointed a
+  // real machine at a stale binary Codex had left behind after an update.
+  // findCodexBinary prefers the CODEX_CLI_PATH the desktop app writes and
+  // otherwise sorts by mtime; the manual instruction and auto-trust must name
+  // the same binary.
+  const bin = findCodexBinary(os.homedir(), env);
+  if (bin && fs.existsSync(bin)) return `"${bin}"`;
   return null;
 }
 
