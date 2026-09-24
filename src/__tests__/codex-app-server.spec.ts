@@ -132,9 +132,14 @@ describe('findCodexBinary', () => {
     const exe = path.join(home, 'codex.exe');
     fs.writeFileSync(exe, '');
     fs.mkdirSync(path.join(home, '.codex'));
+    // Written exactly the way the desktop app writes it: a single-quoted TOML
+    // LITERAL string with single backslashes. Literal strings do no escape
+    // processing, so doubling the backslashes here (an earlier version of this
+    // row did) produced `C:\\Users\\…` on Windows and passed on Linux only
+    // because a POSIX tmpdir has no backslashes to double.
     fs.writeFileSync(
       path.join(home, '.codex', 'config.toml'),
-      `[mcp_servers.node_repl.env]\nCODEX_CLI_PATH = '${exe.replace(/\\/g, '\\\\')}'\n`
+      `[mcp_servers.node_repl.env]\nCODEX_CLI_PATH = '${exe}'\n`
     );
     expect(codexCliPathFromConfig(home)).toBe(exe);
     expect(findCodexBinary(home, {})).toBe(exe);
