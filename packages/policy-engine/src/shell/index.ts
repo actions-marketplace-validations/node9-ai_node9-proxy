@@ -2282,19 +2282,51 @@ let currentStmtOffset = Number.MAX_SAFE_INTEGER;
  * and a memo of the payloads already analysed; the branching vector repeats one
  * payload string, so the memo alone collapses it.
  */
-const PAYLOAD_BUDGET = 96;
+const PAYLOAD_BUDGET = 256;
 let payloadBudget = 0;
 let seenPayloads: Set<string> | null = null;
 
-/** True when the payload may be re-parsed: not seen before, and within budget. */
-function claimPayload(payload: string): boolean {
-  if (!seenPayloads) return true;
-  if (seenPayloads.has(payload)) return false;
-  if (payloadBudget <= 0) return false;
-  payloadBudget--;
-  seenPayloads.add(payload);
-  return true;
+/**
+ * The payload text alone is not what a nested walk judges: the child inherits
+ * the assignment table, so the same string means different things under
+ * different bindings. Keying the memo on the text alone let a benign branch
+ * claim `cat $A` and silently drop the branch that binds `A` to a key
+ * (/code-review, stage 6). The key is the text plus the bindings in force.
+ */
+function payloadKey(payload: string): string {
+  if (!assignmentTable || assignmentTable.size === 0) return payload;
+  const bindings: string[] = [];
+  for (const [name, rec] of assignmentTable) {
+    if (rec.value !== null) bindings.push(`${name}=${rec.value}`);
+  }
+  return `${payload}\u0000${bindings.sort().join('\u0001')}`;
 }
+
+/** 'ok' to re-parse, 'seen' when this exact payload and bindings were already
+ *  judged, 'exhausted' when the walk has spent its budget -- which the caller
+ *  must turn into a verdict, not into silence. */
+function claimPayload(payload: string): 'ok' | 'seen' | 'exhausted' {
+  if (!seenPayloads) return 'ok';
+  const key = payloadKey(payload);
+  if (seenPayloads.has(key)) return 'seen';
+  if (payloadBudget <= 0) return 'exhausted';
+  payloadBudget--;
+  seenPayloads.add(key);
+  return 'ok';
+}
+
+/** What a walk that ran out of budget reports instead of nothing. A command with
+ *  256 distinct wrapper payloads is not a shape anyone types; leaving it silent
+ *  made `<256 cheap wrappers>; sh -c "cat ~/.ssh/id_rsa"` ALLOW, and the verdict
+ *  cache then kept that ALLOW (/code-review, stage 6). */
+const UNANALYSABLE_NESTING: FsOpVerdict = {
+  ruleName: 'review-unanalysable-nesting',
+  verdict: 'review',
+  reason:
+    'This command nests more wrapped shell payloads than the policy engine will ' +
+    'unwrap, so some of what it runs was not read.',
+  path: '',
+};
 
 const ASSIGNMENT_HEADS = new Set(['export', 'declare', 'local', 'readonly', 'typeset']);
 
@@ -2315,20 +2347,21 @@ function recordTopLevelAssignments(f: any): void {
  * rather than written down, so a version that renumbers them cannot silently
  * turn this into a pipe.
  */
-const AND_OR_OPS: Set<number> = (() => {
-  const ops = new Set<number>();
-  for (const src of ['a && b', 'a || b']) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const cmd: any = syntax.NewParser().Parse(src, 'probe')?.Stmts?.[0]?.Cmd;
-      if (cmd && syntax.NodeType(cmd) === 'BinaryCmd') ops.add(cmd.Op);
-    } catch {
-      /* a parser that cannot parse `a && b` leaves the set empty, and this
-         degrades to the pre-existing behaviour: `&&` chains are not recorded. */
-    }
+function probeBinOp(src: string): number | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cmd: any = syntax.NewParser().Parse(src, 'probe')?.Stmts?.[0]?.Cmd;
+    if (cmd && syntax.NodeType(cmd) === 'BinaryCmd') return cmd.Op;
+  } catch {
+    /* a parser that cannot parse `a && b` leaves these null, and the whole
+       branch degrades to the earlier behaviour: chains are not recorded. */
   }
-  return ops;
-})();
+  return null;
+}
+const AND_OP = probeBinOp('a && b');
+const OR_OP = probeBinOp('a || b');
+/** `&&` and `||`: the LEFT operand of both runs unconditionally. */
+const AND_OR_OPS: Set<number> = new Set([AND_OP, OR_OP].filter((o): o is number => o !== null));
 
 /**
  * Record one top-level statement's assignments. Returns whether the statement is
@@ -2354,7 +2387,12 @@ function recordTopLevelStmt(stmt: any): boolean {
     // Bare-ness comes back UP from the recursion rather than being asked for
     // separately: asking made a `&& true` spine quadratic in its length.
     if (!recordTopLevelStmt(stmt.Cmd.X)) return false;
-    return recordTopLevelStmt(stmt.Cmd.Y);
+    // ...and only for `&&`. `||` is the mirror: a bare assignment SUCCEEDS, so
+    // its right operand is the one branch the shell never takes
+    // (`K=KEY || K=/tmp/a; cat $K` went block -> ALLOW when this recorded it).
+    // The chain still counts as bare either way: it exits 0 either way.
+    if (stmt.Cmd.Op === AND_OP) return recordTopLevelStmt(stmt.Cmd.Y);
+    return true;
   }
   if (t !== 'CallExpr' && t !== 'DeclClause') return false;
   let at = 0;
@@ -2364,6 +2402,9 @@ function recordTopLevelStmt(stmt: any): boolean {
     at = 0;
   }
   recordAssignments(stmt.Cmd, at);
+  // `! K=v` still assigns, but it exits 1, so it is not the unconditional shape
+  // and nothing after it on an `&&` chain runs.
+  if (stmt.Negated) return false;
   if (t === 'DeclClause') return ASSIGNMENT_HEADS.has(stmt.Cmd.Variant?.Value ?? '');
   return (stmt.Cmd.Args || []).length === 0 && (stmt.Cmd.Assigns || []).length > 0;
 }
@@ -3074,7 +3115,13 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         for (const action of findActions(words, 0)) {
           const h = unwrapCommandHead(action);
           const inner = literalShellPayload(action.slice(h), baseWord(action[h]));
-          if (inner === null || !claimPayload(inner)) continue;
+          if (inner === null) continue;
+          const claim = claimPayload(inner);
+          if (claim === 'exhausted') {
+            result = stricter(result, UNANALYSABLE_NESTING);
+            continue;
+          }
+          if (claim === 'seen') continue;
           const v = analyzeFsOperationImpl(inner, depth + 1);
           result = stricter(result, v);
           if (result?.verdict === 'block') return false;
@@ -3087,7 +3134,14 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         // (`K=KEY; sh -c "cat $K $K"`) and the wrapper then went unread. `depth`
         // is the bound; the parse cache keys on the normalised string.
         const payload = literalShellPayload(words, name);
-        if (payload !== null && claimPayload(payload)) {
+        const claim = payload === null ? 'seen' : claimPayload(payload);
+        if (claim === 'exhausted') {
+          // Keep walking: a block found elsewhere in the same command must still
+          // win over this review.
+          result = stricter(result, UNANALYSABLE_NESTING);
+          return true;
+        }
+        if (payload !== null && claim === 'ok') {
           const inner = analyzeFsOperationImpl(payload, depth + 1);
           if (inner) {
             result = inner;

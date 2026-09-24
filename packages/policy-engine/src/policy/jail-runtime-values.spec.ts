@@ -217,6 +217,12 @@ describe('JAIL-14a — the table survives a wrapper and an && chain', () => {
     [`K=/tmp/a && K=$HOME/.ssh/id_rsa && cat $K`, 'block'],
     // a left operand that is a real command is still the conditional case
     [`grep -q x f && K=/tmp/a; cat $K`, 'null'],
+    // `||` is the mirror of `&&`: a bare assignment SUCCEEDS, so its right
+    // operand is the one branch the shell never takes
+    [`K=$HOME/.ssh/id_rsa || K=/tmp/a; cat $K`, 'block'],
+    [`K=/tmp/a || K=${K}; cat $K`, 'null'],
+    // `! K=v` assigns, but exits 1, so nothing after it on the chain runs
+    [`! K=$HOME/.ssh/id_rsa && K=/tmp/a; cat $K`, 'block'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
 
   it('a payload that regenerates itself returns, and still blocks', () => {
@@ -230,6 +236,16 @@ describe('JAIL-14a — the table survives a wrapper and an && chain', () => {
     expect(v(bomb('cat /tmp/z'))).toBe('null');
     expect(v(bomb(`cat ${K}`))).toBe('block');
     expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('a walk that runs out of budget says so instead of saying nothing', () => {
+    // The budget is one counter for the whole top-level walk, and an attacker can
+    // spend it with cheap leading statements. Silence there made `<256 cheap
+    // wrappers>; sh -c "cat KEY"` ALLOW, and the verdict cache kept that ALLOW.
+    // Exhaustion is a review: what the engine did not read, it says it did not
+    // read. A real block found elsewhere in the same command still wins.
+    const many = Array.from({ length: 300 }, (_, i) => `sh -c "cat /tmp/f${i}"`).join('; ');
+    expect(v(`${many}; sh -c "cat ${K}"`)).not.toBe('null');
   });
 
   it('an `&& true` spine is linear, not quadratic, in its length', () => {
