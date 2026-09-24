@@ -60,8 +60,20 @@ export function classifyMcp(s: McpServer): McpServerState {
  * re-wrap. Passed as its own argv element (no shell, no re-tokenization), so a
  * name with spaces needs no quoting.
  */
+/**
+ * The single `--upstream` string builder. Quoting is not cosmetic: the gateway
+ * re-splits this string with tokenize(), which treats `\` as an escape, so an
+ * unquoted Windows path loses every separator between config write and spawn
+ * (`C:\Users\x` → `C:Usersx`, ENOENT). Four agent setup flows built it with a
+ * bare join and shipped that bug; they call this now, and so does toGateway,
+ * so there is one implementation rather than five.
+ */
+export function mcpUpstreamString(s: Pick<McpServer, 'command' | 'args'>): string {
+  return [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
+}
+
 export function toGateway(s: McpServer, configName?: string): McpServer {
-  const upstream = [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
+  const upstream = mcpUpstreamString(s);
   // Omit the flag when empty OR when the name starts with '-': a name like
   // "--upstream" would make commander swallow the next token as its value.
   const nameArgs = configName && !configName.startsWith('-') ? ['--config-name', configName] : [];
@@ -109,6 +121,59 @@ export function inventoryMcp(home: string = os.homedir()): McpEntry[] {
         raw: s,
       });
     }
+  }
+  return out;
+}
+
+/**
+ * True when a stored `--upstream` shows the signature of a wrap written by the
+ * pre-fix code on Windows: a drive letter whose path separators are GONE.
+ *
+ *   C:\Users\m\srv.exe   written with a bare join   →   C:Usersmsrv.exe
+ *
+ * The gateway re-splits `--upstream` with tokenize(), which treats `\` as an
+ * escape, so the separators were consumed between config write and spawn and
+ * the server died with ENOENT. Since the wrap REPLACES the user's command, the
+ * pre-corruption path exists nowhere in node9's config: this is detectable but
+ * NOT repairable, which is why the only caller reports rather than rewrites.
+ *
+ * The signature is narrow on purpose. A drive letter with no `\` or `/`
+ * anywhere in the string is not a shape anyone configures by hand, while
+ * `redis://host:6379` and `https://…` arguments are everywhere — hence the
+ * separator test rather than a bare colon test.
+ */
+export function isCorruptedUpstream(upstream: string): boolean {
+  if (!upstream) return false;
+  if (upstream.includes('\\') || upstream.includes('/')) return false;
+  return /(^|\s)[A-Za-z]:[^\s]/.test(upstream);
+}
+
+export interface CorruptedMcpWrap {
+  agent: string;
+  agentLabel: string;
+  mcpFile: string;
+  name: string;
+  upstream: string;
+}
+
+/**
+ * Every node9-wrapped MCP entry, across all agent configs, whose upstream was
+ * corrupted by the pre-fix wrap. Surfaced by `node9 heal`.
+ */
+export function findCorruptedMcpWraps(home: string = os.homedir()): CorruptedMcpWrap[] {
+  const out: CorruptedMcpWrap[] = [];
+  for (const e of inventoryMcp(home)) {
+    if (e.state !== 'gatewayed') continue;
+    const i = e.args.indexOf('--upstream');
+    const upstream = i >= 0 ? (e.args[i + 1] ?? '') : '';
+    if (!isCorruptedUpstream(upstream)) continue;
+    out.push({
+      agent: e.agent,
+      agentLabel: e.agentLabel,
+      mcpFile: e.mcpFile,
+      name: e.name,
+      upstream,
+    });
   }
   return out;
 }

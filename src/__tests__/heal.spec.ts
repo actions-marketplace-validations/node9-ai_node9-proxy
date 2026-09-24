@@ -8,6 +8,11 @@ import path from 'path';
 
 vi.mock('../setup', () => ({ setupAgent: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../agent-wiring', () => ({ getAgentWiring: vi.fn() }));
+// heal also reports MCP wraps corrupted by an older node9. These rows are about
+// hook healing, so stub that scan to "nothing corrupted" — mocking it here
+// rather than widening the agent-wiring mock keeps each mock describing one
+// thing, and keeps this file from having to know what mcp-wrap imports.
+vi.mock('../mcp-wrap', () => ({ findCorruptedMcpWraps: vi.fn(() => []) }));
 
 type Row = {
   id: string;

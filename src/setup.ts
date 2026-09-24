@@ -5,6 +5,7 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import { mcpUpstreamString } from './mcp-wrap';
 import { codexTrustInstruction } from './codex-trust';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
@@ -434,6 +435,32 @@ export function repairLegacyMcpWraps(
   return repaired;
 }
 
+// ── Codex app-managed MCP servers ─────────────────────────────────────────────
+
+// The ChatGPT desktop app injects and rewrites some [mcp_servers] entries
+// itself — `node_repl` backs its browser and computer-use tooling. Its env
+// carries per-launch values (a named pipe with a fresh uuid, CODEX_CLI_PATH),
+// so the entry is the app's to own, not ours.
+//
+// node9 wrapped it anyway. Two consequences, both observed on a real machine
+// 2026-09-24: while wrapped it failed to spawn and took the app's computer-use
+// down with it, and the app then overwrote the entry back to unwrapped — so the
+// wrap never stuck and `init` churned it on every run.
+//
+// Detection prefers the runtime path and the env keys over the name: a user
+// could name their own server `node_repl`, and the app could rename its own.
+export function isCodexAppManagedServer(
+  name: string,
+  server: { command?: string; env?: Record<string, unknown> } | undefined
+): boolean {
+  if (!server) return false;
+  const cmd = (server.command ?? '').replace(/\\/g, '/').toLowerCase();
+  if (cmd.includes('/openai/codex/runtimes/')) return true;
+  const envKeys = Object.keys(server.env ?? {});
+  if (envKeys.some((k) => k.startsWith('NODE_REPL_') || k === 'CODEX_CLI_PATH')) return true;
+  return name === 'node_repl';
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Matches hook commands written by node9 in any of these forms:
@@ -793,7 +820,7 @@ export async function setupClaude(): Promise<void> {
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
 
@@ -951,7 +978,7 @@ export async function setupGemini(): Promise<void> {
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
 
@@ -1739,7 +1766,7 @@ export async function setupCursor(): Promise<void> {
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
 
@@ -1989,10 +2016,24 @@ export async function setupCodex(): Promise<void> {
 
   // ── Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  const appManaged: string[] = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    // Entries the Codex app owns are not ours to wrap — see
+    // isCodexAppManagedServer. Skipping them is the fix for a wrap that broke
+    // the app's own tooling and never stuck.
+    if (isCodexAppManagedServer(name, server)) {
+      appManaged.push(name);
+      continue;
+    }
+    const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
+  }
+
+  if (appManaged.length > 0) {
+    console.log(
+      chalk.gray(`  ℹ️  Managed by the Codex app — not wrapped: ${appManaged.join(', ')}`)
+    );
   }
 
   if (serversToWrap.length > 0) {

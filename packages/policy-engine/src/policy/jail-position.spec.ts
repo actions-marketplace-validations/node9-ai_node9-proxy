@@ -24,7 +24,16 @@ import { positionedArgs, analyzeFsOperation, type PositionedArg } from '../shell
 const syntax = (mvdan as { syntax: any }).syntax;
 const parser = syntax.NewParser();
 
-/** The words of the first CallExpr, resolved the way the engine resolves them. */
+/** A plain `$HOME` / `${HOME}` / `$USERPROFILE`, which the engine resolves to `~`
+ *  since stage 6 (JAIL-15). Any modifier makes it dynamic again. */
+const plainHome = (p: any): boolean =>
+  syntax.NodeType(p) === 'ParamExp' &&
+  ['HOME', 'USERPROFILE'].includes(p.Param?.Value) &&
+  !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
+
+/** The words of the first CallExpr, resolved the way the engine resolves them.
+ *  This replica must track resolveWordLiteral, or the invariant below pins a
+ *  resolver the code no longer has. */
 function wordsOf(cmd: string): (string | null)[] {
   const f = parser.Parse(cmd, 'spec');
   const call = f.Stmts[0].Cmd;
@@ -34,10 +43,13 @@ function wordsOf(cmd: string): (string | null)[] {
       const t = syntax.NodeType(p);
       if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
       else if (t === 'SglQuoted') s += p.Value ?? '';
+      else if (plainHome(p)) s += '~';
       else if (t === 'DblQuoted') {
         const inner: any[] = p.Parts ?? [];
-        if (!inner.every((ip: any) => syntax.NodeType(ip) === 'Lit')) return null;
-        s += inner.map((ip: any) => ip.Value ?? '').join('');
+        if (!inner.every((ip: any) => syntax.NodeType(ip) === 'Lit' || plainHome(ip))) return null;
+        s += inner
+          .map((ip: any) => (plainHome(ip) ? '~' : (ip.Value ?? '').replace(/\\([$`"\\])/g, '$1')))
+          .join('');
       } else return null;
     }
     return s;
