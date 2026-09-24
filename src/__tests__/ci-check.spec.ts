@@ -100,6 +100,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
@@ -118,6 +119,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read \${{ github.event.issue.body }}'
           claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
@@ -200,6 +202,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body and dedupe'
           claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
@@ -226,6 +229,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Write,Bash(gh api *),Bash(python3 .claude/scripts/x.py *)"'
@@ -252,6 +256,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
 `;
@@ -275,6 +280,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash(bash scripts/get_pr.sh:*),Write"'
@@ -309,6 +315,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review github.event.pull_request.title'
           claude_args: '--allowedTools "Bash(git diff *),Bash(git log *),Read,Write,GrepTool"'
@@ -331,6 +338,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review github.event.pull_request.title'
           claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
@@ -355,6 +363,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--disallowedTools "Bash,Edit,Write,MultiEdit,WebFetch,WebSearch,Task"'
@@ -381,6 +390,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'reply to github.event.comment.body'
           claude_args: '--allowedTools "Bash(gh issue:*),Bash(cat docs/*),Bash(echo *),Read,Write"'
@@ -412,6 +422,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash(curl example.com:*),Read"'
@@ -439,6 +450,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash(curl a:*),Read"'
@@ -463,6 +475,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash(echo (:*),Write,Read"'
@@ -490,6 +503,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           settings: '{"allowedTools":["Bash","Write"]}'
@@ -520,6 +534,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "${long1},${long2},Read"'
@@ -651,6 +666,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
@@ -679,6 +695,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
@@ -707,6 +724,7 @@ jobs:
           path: pr-head
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
@@ -766,6 +784,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'triage github.event.issue.body'
@@ -788,6 +807,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'triage github.event.issue.body'
@@ -814,6 +834,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'label github.event.issue.body'
           claude_args: '--allowedTools "Bash(gh:*)"'
@@ -841,6 +862,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash(gh:*)"'
@@ -850,6 +872,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'read github.event.issue.body'
           claude_args: '--allowedTools "Bash"'
@@ -941,6 +964,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'do task for mode \${{ inputs.mode }}'
           claude_args: '--allowedTools "Bash,Write,Edit"'
@@ -967,6 +991,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'process \${{ github.event.issue.body }}'
           claude_args: '--allowedTools "Bash(gh:*),Write"'
@@ -1038,6 +1063,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'triage \${{ github.event.issue.title }}'
           claude_args: '--allowedTools "Bash(gh issue view:*),Bash(gh label list:*),Read"'
@@ -1063,6 +1089,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'triage \${{ github.event.issue.title }}'
           claude_args: '--allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Write,Read"'
@@ -1086,6 +1113,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'triage \${{ github.event.issue.title }}'
           claude_args: '--allowedTools "Bash(gh:*),Bash(git:*),Read"'
@@ -1116,6 +1144,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.allowed == 'true'
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.comment.body }}'
           claude_args: '--allowedTools "Bash"'
@@ -1145,6 +1174,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash"'
@@ -1174,6 +1204,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.build.outputs.ok == 'true'
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.comment.body }}'
           claude_args: '--allowedTools "Bash"'
@@ -1199,6 +1230,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash"'
@@ -1212,6 +1244,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.allowed == 'true'
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'triage'
           claude_args: '--allowedTools "Bash(gh issue view:*)"'
@@ -1235,6 +1268,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'triage \${{ github.event.issue.title }}'
           claude_args: '--allowedTools "Bash(python3 build.py),Read"'
@@ -1257,6 +1291,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash(gh issue view:*),Read"'
 `;
@@ -1284,6 +1319,7 @@ jobs:
           ref: \${{ inputs.head_ref }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'build'
           claude_args: '--allowedTools "Bash"'
@@ -1310,6 +1346,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash(git:*),Read"'
@@ -1350,6 +1387,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash(git:*)"'
@@ -1397,6 +1435,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash(git:*),Read"'
@@ -1424,6 +1463,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review \${{ github.event.pull_request.title }}'
           claude_args: '--allowedTools "Bash(git:*)"'
@@ -1528,6 +1568,7 @@ jobs:
           ref: \${{ inputs.head_sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'review the PR'
           claude_args: '--allowedTools "Bash"'
@@ -1549,6 +1590,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'build the project'
           claude_args: '--allowedTools "Bash"'
@@ -1573,6 +1615,7 @@ jobs:
           path: pr-head
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'inspect'
           claude_args: '--allowedTools "Bash"'
@@ -1750,6 +1793,7 @@ jobs:
         env:
 ${env}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'read github.event.issue.body'
@@ -1846,6 +1890,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'respond to github.event.issue.body'
@@ -1878,6 +1923,7 @@ jobs:
         env:
           SERVICE_API_KEY: \${{ secrets.SERVICE_API_KEY }}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'triage github.event.comment.body'
@@ -1911,6 +1957,7 @@ jobs:
         env:
           ANTHROPIC_BASE_URL: \${{ secrets.MY_INFERENCE_URL }}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.MY_INFERENCE_KEY }}
           prompt: 'read github.event.issue.body'
@@ -1932,6 +1979,7 @@ jobs:
         env:
           DATABASE_URL: \${{ secrets.DATABASE_URL }}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.MY_INFERENCE_KEY }}
           prompt: 'read github.event.issue.body'
@@ -1958,6 +2006,7 @@ jobs:
         env:
           DATABASE_URL: \${{ secrets.DATABASE_URL }}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           prompt: 'build'
           claude_args: '--allowedTools "Bash"'
@@ -1981,6 +2030,7 @@ jobs:
         env:
           AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
         with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           prompt: 'read github.event.issue.body'
@@ -2721,5 +2771,88 @@ describe("CI-6 — a skill's supporting files (515 beside 383 SKILL.md, 2026-09-
     expect(
       analyzeInstructionFile('references/troubleshooting.md', task).map((f) => f.rule)
     ).toEqual(['CI-6.fetch-and-obey']);
+  });
+});
+
+describe('CI-2 — the write gate needs github_token, "*" alone is inert (2026-09-24)', () => {
+  // claude-code-action's permissions.ts bypasses its write-permission gate only when
+  // `allowedNonWriteUsers && githubTokenProvided`, and action.yml sets that flag from the
+  // github_token input (OVERRIDE_GITHUB_TOKEN). Present since the input landed (#550,
+  // 2025-09-07). Before this change CI-2 keyed off "*" alone and called four live
+  // workflows injectable that the action would have refused an outsider on.
+  const withStep = (withBlock: string, envBlock = '') => `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+${envBlock}        with:
+${withBlock}
+          claude_args: '--allowedTools "Bash"'
+`;
+
+  it('"*" WITHOUT github_token: the default gate stays on → below high, and the note says why', () => {
+    const f = analyzeWorkflow('x.yml', withStep('          allowed_non_write_users: "*"'));
+    expect(f, 'a gated workflow is still reported').not.toBeNull();
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThan(SEVERITY_RANK.high);
+    expect(f!.signals.join(' ')).not.toMatch(/any user can trigger/);
+    expect(f!.mitigations?.join(' ') ?? '').toMatch(/without github_token/);
+  });
+
+  it('"*" WITH github_token on the same step: the gate is off → high, and the signal names both', () => {
+    const f = analyzeWorkflow(
+      'x.yml',
+      withStep(
+        '          github_token: \\${{ secrets.GITHUB_TOKEN }}\n          allowed_non_write_users: "*"'
+      )
+    )!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(f.signals.join(' ')).toMatch(/"\*" with github_token/);
+    expect(f.mitigations?.join(' ') ?? '').not.toMatch(/without github_token/);
+  });
+
+  it('the env var the action reads directly (OVERRIDE_GITHUB_TOKEN) also arms the bypass', () => {
+    const f = analyzeWorkflow(
+      'x.yml',
+      withStep(
+        '          allowed_non_write_users: "*"',
+        '        env:\n          OVERRIDE_GITHUB_TOKEN: \\${{ secrets.GITHUB_TOKEN }}\n'
+      )
+    )!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  it('github_token on a DIFFERENT step does not arm "*" on the agent step', () => {
+    const wf = `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+          token: \${{ secrets.GITHUB_TOKEN }}
+      - uses: some/other-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('x.yml', wf);
+    expect(f, 'still reported').not.toBeNull();
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThan(SEVERITY_RANK.high);
   });
 });
