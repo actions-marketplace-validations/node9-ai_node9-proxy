@@ -2351,7 +2351,7 @@ describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
     const { renderScan } = await import('../ci-check/render.js');
     const out = renderScan(result({ worst: null }));
     expect(out).toMatch(/Keep it green/);
-    expect(out).toContain('marketplace/actions/node9-agent-security-check');
+    expect(out).toContain('marketplace/actions/node9-agent-security?');
     expect(out).toContain('ref=cli_scan_repo'); // attribution param present
   });
 
@@ -2359,7 +2359,7 @@ describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
     const { renderScan } = await import('../ci-check/render.js');
     const out = renderScan(result({ worst: 'high', findings: [finding('high')] }));
     expect(out).toMatch(/to fix — then stop the next at the PR/);
-    expect(out).toContain('marketplace/actions/node9-agent-security-check');
+    expect(out).toContain('marketplace/actions/node9-agent-security?');
     expect(out).not.toMatch(/well-configured/);
   });
 
@@ -2374,7 +2374,27 @@ describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
   it('the PR-comment markdown renderer has NO Action CTA (avoid in-PR spam)', async () => {
     const { renderScanMarkdown } = await import('../ci-check/render.js');
     const out = renderScanMarkdown(result({ worst: null }));
-    expect(out).not.toContain('marketplace/actions/node9-agent-security-check');
+    expect(out).not.toContain('marketplace/actions/'); // any listing, not one slug
+  });
+
+  // The address was stated in two places and they drifted: README.md kept the live
+  // listing while render.ts pointed at a slug that died with the archived
+  // agent-security-action repo, so every scan-repo run ended on a 404. These pin the
+  // two to one address and pin the dead slug out.
+  it('links to the same Marketplace listing the README does', async () => {
+    const { ACTION_URL } = await import('../ci-check/render.js');
+    const readme = fs.readFileSync(path.join(__dirname, '..', '..', 'README.md'), 'utf8');
+    const listing = readme.match(/https:\/\/github\.com\/marketplace\/actions\/[a-z0-9-]+/);
+    expect(listing, 'README.md states a Marketplace listing').not.toBeNull();
+    expect(ACTION_URL.split('?')[0]).toBe(listing![0]);
+  });
+
+  it('never links to the archived slug', async () => {
+    const { renderScan } = await import('../ci-check/render.js');
+    for (const worst of [null, 'high'] as const) {
+      const out = renderScan(result({ worst, findings: worst ? [finding('high')] : [] }));
+      expect(out).not.toContain('node9-agent-security-check');
+    }
   });
 });
 
