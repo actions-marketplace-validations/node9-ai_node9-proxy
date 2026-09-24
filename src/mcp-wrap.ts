@@ -60,8 +60,20 @@ export function classifyMcp(s: McpServer): McpServerState {
  * re-wrap. Passed as its own argv element (no shell, no re-tokenization), so a
  * name with spaces needs no quoting.
  */
+/**
+ * The single `--upstream` string builder. Quoting is not cosmetic: the gateway
+ * re-splits this string with tokenize(), which treats `\` as an escape, so an
+ * unquoted Windows path loses every separator between config write and spawn
+ * (`C:\Users\x` → `C:Usersx`, ENOENT). Four agent setup flows built it with a
+ * bare join and shipped that bug; they call this now, and so does toGateway,
+ * so there is one implementation rather than five.
+ */
+export function mcpUpstreamString(s: Pick<McpServer, 'command' | 'args'>): string {
+  return [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
+}
+
 export function toGateway(s: McpServer, configName?: string): McpServer {
-  const upstream = [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
+  const upstream = mcpUpstreamString(s);
   // Omit the flag when empty OR when the name starts with '-': a name like
   // "--upstream" would make commander swallow the next token as its value.
   const nameArgs = configName && !configName.startsWith('-') ? ['--config-name', configName] : [];
