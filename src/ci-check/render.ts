@@ -24,8 +24,12 @@ const COLOR: Record<Severity, (s: string) => string> = {
 // same check on every PR. node9-proxy (runtime) is intentionally NOT offered
 // here — it's a live-agent tool, off-topic for a CI scan, and posture proves a
 // single loud CTA converts better than two. ?ref lets us attribute installs.
-const ACTION_URL =
-  'https://github.com/marketplace/actions/node9-agent-security-check?ref=cli_scan_repo';
+// The listing is node9-agent-security, which installs node9-ai/node9-proxy@v2. It
+// used to be node9-agent-security-check, which went dead with the archived
+// agent-security-action repo; README.md states the same address, and a test
+// keeps the two from drifting apart again.
+export const ACTION_URL =
+  'https://github.com/marketplace/actions/node9-agent-security?ref=cli_scan_repo';
 
 /**
  * Closing call-to-action: turn a one-time scan into continuous coverage.

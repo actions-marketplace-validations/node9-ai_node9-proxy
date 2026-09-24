@@ -8,7 +8,7 @@ import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import { analyzeInstructionFile, INSTRUCTION_FILE_RE } from './instructions';
+import { analyzeInstructionFile, isInstructionFile, skillDirsOf } from './instructions';
 import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
@@ -29,6 +29,9 @@ export function scanTree(tree: RepoTree): ScanResult {
   const inspected: string[] = [];
   const notes = [...tree.notes];
 
+  // Same skill directories the selector used, so a supporting file that was fetched is
+  // also routed to CI-6 rather than read and silently dropped.
+  const skillDirs = skillDirsOf(tree.files.map((f) => f.path));
   for (const file of tree.files) {
     inspected.push(file.path);
     try {
@@ -43,7 +46,7 @@ export function scanTree(tree: RepoTree): ScanResult {
         findings.push(...analyzeMcp(file.path, file.content));
       } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
         findings.push(...analyzeCodexConfig(file.path, file.content)); // CI-3 + CI-1 (1c-A)
-      } else if (INSTRUCTION_FILE_RE.test(file.path)) {
+      } else if (isInstructionFile(file.path, skillDirs)) {
         findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6
       }
     } catch (err) {
