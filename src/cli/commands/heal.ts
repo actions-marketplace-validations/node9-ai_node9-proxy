@@ -9,6 +9,7 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
 import { getAgentWiring, type AgentWiringRow } from '../../agent-wiring';
+import { findCorruptedMcpWraps } from '../../mcp-wrap';
 import { setupAgent } from '../../setup';
 import { loadHookBaseline, loadNotified, saveNotified } from '../../daemon/hook-baseline';
 
@@ -28,12 +29,46 @@ function backupForHeal(file: string): void {
 }
 
 /**
+ * Surface MCP servers whose `--upstream` was corrupted by an older node9 on
+ * Windows. Reported, never rewritten — see findCorruptedMcpWraps.
+ */
+function reportCorruptedMcpWraps(): void {
+  const corrupted = findCorruptedMcpWraps();
+  if (corrupted.length === 0) return;
+  console.log(
+    chalk.yellow(
+      `  ⚠️  ${corrupted.length} MCP server(s) were corrupted by an older node9 and cannot start:`
+    )
+  );
+  for (const c of corrupted) {
+    console.log(chalk.yellow(`     • ${c.name}  (${c.agentLabel})`));
+    console.log(chalk.gray(`       ${c.mcpFile}`));
+    console.log(chalk.gray(`       stored upstream: ${c.upstream}`));
+  }
+  console.log(
+    chalk.gray(
+      '\n     The original command lost its path separators, so node9 cannot recover it.\n' +
+        '     Remove and re-add each server in the agent, then run `node9 init` to re-wrap.\n'
+    )
+  );
+}
+
+/**
  * Core of `node9 heal`. Re-installs node9's hooks for governed-but-unwired agents
  * (backup-first). Returns the labels it healed (for tests / callers). Exported so
  * the logic is unit-testable without spawning the CLI.
  */
 export async function runHeal(name?: string): Promise<{ healed: string[] }> {
   console.log(chalk.cyan.bold('\n🩹 Node9 Heal\n'));
+
+  // MCP wraps corrupted by the pre-fix Windows join are reported FIRST and
+  // unconditionally: they are dead right now, and they are independent of
+  // whether any agent's hooks need healing (the early return below would
+  // otherwise hide them behind "all healthy"). node9 cannot repair them — the
+  // pre-corruption path exists nowhere in our config — so this reports and
+  // stops. A rewrite here would put a broken path back as the user's own
+  // command and stop looking like node9's doing.
+  reportCorruptedMcpWraps();
 
   const baseline = loadHookBaseline();
   const wiring = getAgentWiring();

@@ -386,13 +386,21 @@ describe('rm same-command create-then-delete waiver', () => {
       "if false; then cat > victim.ts <<'EOF'\nEOF\nfi\necho x; rm -f victim.ts",
       'create in dead if-branch',
     ],
-    [HD + 'echo x; rm -rf $HOME', 'dynamic target, not created'],
+    [HD + 'echo x; rm -rf $DIR', 'dynamic target, not created'],
     [HD + 'echo x; rm -f fn-probe.ts $VAR', 'a dynamic arg alongside the created file'],
     [HD + 'echo x; rm -f fn-probe.ts secrets.txt', 'a non-created sibling target'],
     ['rm .env', 'plain sensitive delete (posture unchanged)'],
     ['rm secrets.txt', 'plain delete (posture unchanged)'],
   ])('REVIEWS: %s (%s)', async (cmd) => {
     expect(await decide(cmd)).toBe('review');
+  });
+
+  // Stage 6 (JAIL-15): a plain `$HOME` resolves to `~`, so this target is no
+  // longer dynamic. It reaches block-rm-rf-home, which is the right answer for
+  // deleting the home directory; it was a review only because the resolver could
+  // not read the word. The waiver row above keeps its intent with `$DIR`.
+  it('BLOCKS: rm -rf $HOME, now that $HOME resolves', async () => {
+    expect(await decide(HD + 'echo x; rm -rf $HOME')).toBe('block');
   });
 
   // NOT waived → still block (block tier wins regardless)

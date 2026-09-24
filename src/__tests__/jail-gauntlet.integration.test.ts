@@ -274,6 +274,81 @@ describe.skipIf(process.platform === 'win32')(
   }
 );
 
+/**
+ * ⭐ STAGE 6: THE RUNTIME-RESOLVED VALUE, against the BUILT-IN baseline.
+ *
+ * Every row here was ALLOW at this gate on 2.20.0 with a real credential path
+ * behind the variable or substitution, and every one is the shape an engineer
+ * types by accident (`$HOME`) or an attacker types on purpose (`$(echo …)`). The
+ * reader axis above runs under a USER jail whose rule is a regex over the raw
+ * text, so it cannot witness any of this: the text `$HOME/.ssh` never matched.
+ * These rows use `~/.ssh/id_rsa` with nothing configured, so only the AST tier
+ * can answer, and the control is the plain spelling.
+ *
+ * ⚠️ WINDOWS skipped for the reason pinned at the engine-level block below.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 6: a value resolved at runtime is judged',
+  () => {
+    const keyIn = (home: string) => {
+      const ssh = path.join(home, '.ssh');
+      fs.mkdirSync(ssh, { recursive: true });
+      const key = path.join(ssh, 'id_rsa');
+      fs.writeFileSync(key, 'x\n');
+      return key;
+    };
+
+    it('CONTROL: the plain spelling blocks', () => {
+      const { home } = jailedHome();
+      const r = probe(home, 'Bash', { command: `cat ${keyIn(home)}` });
+      expect(r.verdict, 'without this the rows below prove nothing').toBe('block');
+    });
+
+    it.each([
+      ['$HOME', (k: string) => `cat ${k.replace(/^.*(?=\/\.ssh\/)/, '$HOME')}`, 'block'],
+      ['"$HOME"', (k: string) => `cat "${k.replace(/^.*(?=\/\.ssh\/)/, '$HOME')}"`, 'block'],
+      ['${HOME}', (k: string) => `cat ${k.replace(/^.*(?=\/\.ssh\/)/, '${HOME}')}`, 'block'],
+      [
+        'a copy through $HOME',
+        (k: string) => `cp ${k.replace(/^.*(?=\/\.ssh\/)/, '$HOME')} /tmp/n9-k`,
+        'review',
+      ],
+      ['an assignment', (k: string) => `K=${k}; cat $K`, 'block'],
+      ['an exported assignment', (k: string) => `export K=${k}; cat $K`, 'block'],
+      ['two hops', (k: string) => `S=$HOME/.ssh; D=$S/${path.basename(k)}; cat $D`, 'block'],
+      ['$(echo …)', (k: string) => `cat $(echo ${k})`, 'block'],
+      ['backticks', (k: string) => `cat \`echo ${k}\``, 'block'],
+      [
+        'a substitution inside a word',
+        (k: string) => `cat $(echo ${path.dirname(k)})/${path.basename(k)}`,
+        'block',
+      ],
+      ['two levels of eval', (k: string) => `eval "eval \\"cat ${k}\\""`, 'block'],
+      ['two levels of sh -c', (k: string) => `sh -c "sh -c \\"cat ${k}\\""`, 'block'],
+      ["find's action", (k: string) => `find /tmp -maxdepth 0 -exec cat ${k} \;`, 'block'],
+    ])('%s', (_label, mk, want) => {
+      const { home } = jailedHome();
+      const r = probe(home, 'Bash', { command: mk(keyIn(home)) });
+      expect(r.verdict).toBe(want);
+    });
+
+    it.each([
+      ['the home itself is not a credential', () => `cat $HOME/notes.txt`],
+      ['key USE through $HOME', () => `ssh -i $HOME/.ssh/id_rsa host`],
+      ['key INSTALL through $HOME', () => `cp /tmp/ci_key $HOME/.ssh/id_rsa`],
+      ['a reassigned HOME is not the real home', () => `HOME=/tmp/fake; cat $HOME/id_rsa`],
+      ['a genuinely dynamic substitution', () => `cat $(find $HOME/.ssh -name 'id_*')`],
+      ['a pattern that mentions the jail', () => `grep -rn "\\.ssh/" $DIR`],
+      ['the CI idiom the rejected regex would have hit', () => `cat $TEMPLATE | envsubst > .env`],
+    ])('%s still runs', (_label, mk) => {
+      const { home } = jailedHome();
+      keyIn(home);
+      const r = probe(home, 'Bash', { command: mk() });
+      expect(r.verdict).toBe('allow');
+    });
+  }
+);
+
 /** Build a command that MOVES rather than prints, per verb. */
 function copyCmd(verb: string, src: string): string {
   if (verb === 'tar') return `tar cf /tmp/n9-gauntlet.tar ${src}`;

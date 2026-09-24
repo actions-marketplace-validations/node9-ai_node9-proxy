@@ -618,7 +618,51 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // (DEFAULT_CONFIG's review-curl-pipe-shell and the bash-safe shield copy), not
 // an engine detector — the engine alone emits nothing for `curl | sh` either.
 // Its widening is real and gated live, but it changes no history scan.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v17';
+// v18 (2026-09-23): stage 6 of the credential jail, the RUNTIME-RESOLVED value.
+// Five gaps closed in one resolver, so every tier inherits each of them: a plain
+// `$HOME`/`$USERPROFILE` is `~` (JAIL-15); a value assigned earlier in the same
+// command is followed, transitively, with a reassigned HOME overriding the
+// default (JAIL-14, half one); `$(echo X)` / `$(printf '%s' X)` with a literal X
+// is X (JAIL-14, half two, replacing a regex un-suppression the corpus rejected
+// at 15 false positives and 7 misses); string-wrapped commands are re-parsed
+// three levels deep instead of one (JAIL-1); and find's -exec ACTION has its own
+// words judged (JAIL-11). rsync also gained a destination arm (JAIL-8), which
+// changes the egress feed rather than this one. Measured through
+// extractCanonicalFindings before bumping:
+//
+//   command                                v17                 v18
+//   cat $HOME/.ssh/id_rsa                (none)  ->  ast-fs-op block/critical
+//   cat "$HOME/.ssh/id_rsa"              (none)  ->  ast-fs-op block/critical
+//   cat $USERPROFILE/.ssh/id_rsa         (none)  ->  ast-fs-op block/critical
+//   cp $HOME/.ssh/id_rsa /tmp/k          (none)  ->  ast-fs-op review/critical
+//   K=KEY; cat $K                        (none)  ->  ast-fs-op block/critical
+//   export F=~/.env; cat $F              (none)  ->  ast-fs-op block/high
+//   S=$HOME/.ssh; D=$S/id_rsa; cat $D    (none)  ->  ast-fs-op block/critical
+//   cat $(echo KEY)                      (none)  ->  ast-fs-op block/critical
+//   cat `echo KEY`                       (none)  ->  ast-fs-op block/critical
+//   cat "$(printf '%s' ~/.env)"          (none)  ->  ast-fs-op block/high
+//   cat $(echo ~/.ssh)/id_rsa            (none)  ->  ast-fs-op block/critical
+//   eval "eval \"cat KEY\""              (none)  ->  ast-fs-op block/critical
+//   sh -c "sh -c \"cat KEY\""            (none)  ->  ast-fs-op block/critical
+//   find . -exec cat KEY \;              (none)  ->  ast-fs-op block/critical
+//   find . -exec grep --file=KEY {} +    (none)  ->  ast-fs-op block/critical
+//   find . -exec cp KEY /tmp/k \;        (none)  ->  ast-fs-op review/critical
+//   rm -rf $HOME                         review  ->  block-rm-rf-home
+//   cat $HOME/notes.txt                  (none)  ->  (none)   the home is not a credential
+//   ssh -i $HOME/.ssh/id_ed25519 host    (none)  ->  (none)   key USE
+//   cp /tmp/ci_key $HOME/.ssh/id_ed25519 (none)  ->  (none)   key INSTALL
+//   HOME=/tmp/x true; cat $HOME/id_rsa   (none)  ->  (none)   a prefix assignment does not persist
+//   cat $(find ~/.ssh -name 'id_*')      (none)  ->  (none)   genuinely dynamic
+//   grep -rn "\.ssh/" $DIR               (none)  ->  (none)   a pattern, not a path
+//   cat $TEMPLATE | envsubst > .env      (none)  ->  (none)   the CI idiom the regex would have hit
+//   cat KEY                              block   ->  block    (control, unmoved)
+//
+// Variable and substitution expansion happen ONLY inside the jail walk; the
+// normalizer, which shares the resolver, leaves command text exactly as before,
+// so the regex twins and the scanner's text see what they always saw.
+// Verdict snapshot over 390 corpus commands: 2 moved, both ATTACK rows
+// (`F=KEY; cat $F`, `F=KEY; cp $F /tmp/x`), 0 legitimate rows.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v18';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -638,7 +682,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v17';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'ca0a79b38a804347';
+export const CANONICAL_EXTRACTOR_HASH = '5b2e76537f368d99';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

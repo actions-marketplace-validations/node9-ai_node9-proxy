@@ -211,12 +211,19 @@ describe('jail reachability — a dynamic payload is NOT re-parsed', () => {
   // These carry ParamExp / CmdSubst. The jail cannot know the runtime command
   // and must not guess; detectDangerousShellExec + the Class B evalDynamic
   // knob own them. The jail's answer here is null, and stays null.
-  it.each([[`bash -c "base64 $0" ${X}`], [`eval "$CMD"`], [`sh -c "cat $F"`], [`F=${X}; cat $F`]])(
+  it.each([[`bash -c "base64 $0" ${X}`], [`eval "$CMD"`], [`sh -c "cat $F"`]])(
     '%s -> jail says nothing',
     (cmd) => {
       expect(v(cmd)).toBeNull();
     }
   );
+  // Flipped 2026-09-23: stage 6 (JAIL-14, half one) records every standalone
+  // assignment in the same command string, so `F=KEY; cat $F` is no longer a
+  // dynamic payload -- the value is one statement to the left and is followed.
+  // The three rows above stay null: their values are not in the command at all.
+  it('F=KEY; cat $F -> the jail follows the assignment', () => {
+    expect(v(`F=${X}; cat $F`)).toMatch(/^block:/);
+  });
 });
 
 // Design 5.1 predicted a false positive here -- `sudo echo cat X` -- as the
@@ -258,7 +265,10 @@ describe('jail reachability — non-goals, pinned as failing', () => {
   it('an absolute reader path under a wrapper', () => {
     expect(v(`env /bin/cat ${X}`)).toMatch(/^block:/);
   });
-  it.fails('depth 2', () => {
+  // Flipped 2026-09-23: stage 6 (JAIL-1) raised the string-wrapper bound from
+  // one level to three, so this pinned non-goal now passes on purpose. Kept as a
+  // positive row; the new bound is pinned in jail-nested-wrappers.spec.ts.
+  it('depth 2', () => {
     expect(v(`sh -c 'sh -c "cat ${X}"'`)).toMatch(/^block:/);
   });
 });
