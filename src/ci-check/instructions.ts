@@ -69,6 +69,37 @@ const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 export const INSTRUCTION_FILE_RE =
   /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)SKILL\.md$|(^|\/)\.claude\/agents\/[^/]+\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
 
+/** Directories that hold a skill: the parent of every SKILL.md, except the repository
+ *  root. A root-level SKILL.md is a repository that IS a skill package, and treating its
+ *  root as a skill directory would pull every markdown file in the repo into the surface. */
+export function skillDirsOf(paths: Iterable<string>): Set<string> {
+  const dirs = new Set<string>();
+  for (const p of paths) {
+    const m = /^(.+)\/SKILL\.md$/.exec(p);
+    if (m) dirs.add(m[1]);
+  }
+  return dirs;
+}
+
+/** A markdown file inside a skill directory, other than a SKILL.md. SKILL.md is the entry
+ *  point the agent loads; these are the reference files it points at and the agent reads
+ *  on demand, so they carry the same trust. 515 of them sat beside 383 SKILL.md files in
+ *  the 2026-09-24 corpus, more than half the text a skill can hand to an agent. */
+export function isSkillSupportFile(path: string, skillDirs: ReadonlySet<string>): boolean {
+  if (!path.endsWith('.md') || /(^|\/)SKILL\.md$/.test(path)) return false;
+  for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
+    if (skillDirs.has(path.slice(0, d))) return true;
+  }
+  return false;
+}
+
+/** ONE answer to "is this an instruction file". `skillDirs` must come from skillDirsOf
+ *  over the same tree: a skill's supporting files are instructions only by virtue of the
+ *  SKILL.md beside them, so this cannot be decided from one path alone. */
+export function isInstructionFile(path: string, skillDirs: ReadonlySet<string>): boolean {
+  return INSTRUCTION_FILE_RE.test(path) || isSkillSupportFile(path, skillDirs);
+}
+
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare
 // "system:" (too FP-prone in docs).
 const OVERRIDE_RE =
@@ -93,7 +124,7 @@ const EXFIL_RE =
 // `# Shell script (installs to …)` comment inside a fence that the line scan takes for a
 // heading (2 of the 12 skill-corpus false positives, 2026-09-22).
 const HUMAN_SECTION_RE =
-  /^#+\s.*\b(install(ation|ers?|ing|s)?|setup|set ?up|getting started|quick ?start|contributing|contribution|development|dev setup|build|prerequisites|requirements|usage)\b/i;
+  /^#+\s.*\b((?:re-?|un)?install(ation|ers?|ing|s)?|setup|set ?up|getting started|quick ?start|contributing|contribution|development|dev setup|build|prerequisites|requirements|usage)\b/i;
 
 // A safety/negation clause ("never read ~/.aws/…", "do NOT curl | bash") — the presence
 // of the sink here is a GUARDRAIL, not a directive. Prevents flagging a repo for its own

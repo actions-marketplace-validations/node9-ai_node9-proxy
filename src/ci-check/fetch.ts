@@ -5,7 +5,7 @@
 // degrades to a note (fail-open) so a rate-limit or missing dir never throws.
 
 import fs from 'fs';
-import { INSTRUCTION_FILE_RE } from './instructions';
+import { isInstructionFile, isSkillSupportFile, skillDirsOf } from './instructions';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
@@ -65,7 +65,19 @@ const WORKFLOW_DIR = '.github/workflows';
 // are spelled here. Adding a surface type means one edit, and the dispatcher sees it too.
 const CONFIG_FILE_RE =
   /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
-const SURFACE_BASENAME = new RegExp(`${INSTRUCTION_FILE_RE.source}|${CONFIG_FILE_RE.source}`);
+/** Every agent-surface path in a tree, entry points and configs first and a skill's
+ *  supporting files last, so a cap never drops a SKILL.md to make room for its own
+ *  reference docs. The ONE selector: the GitHub Trees path, the local walk and the git-ref
+ *  reader all call it, so a head scan and a base scan see the same shapes and a CI-5 diff
+ *  never reports an old supporting file as new. Callers pass paths already filtered for
+ *  ignored directories. */
+export function selectSurface(paths: string[]): string[] {
+  const skillDirs = skillDirsOf(paths);
+  const isSupport = (p: string) => isSkillSupportFile(p, skillDirs);
+  return paths
+    .filter((p) => isInstructionFile(p, skillDirs) || CONFIG_FILE_RE.test(p))
+    .sort((a, b) => Number(isSupport(a)) - Number(isSupport(b)));
+}
 // Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
 // `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
 const IGNORE_HARD = /(^|\/)(node_modules|vendor|\.git|\.next|\.venv|site-packages)\//;
@@ -83,7 +95,7 @@ const MAX_SURFACE_FILES = 200;
  *  dir is excluded but NOTED (not silently dropped). Shared by the GitHub Trees path and local
  *  recursion. */
 export function pickSurfacePaths(paths: string[], truncated: boolean, notes: string[]): string[] {
-  const surface = paths.filter((p) => SURFACE_BASENAME.test(p) && !IGNORE_HARD.test(p));
+  const surface = selectSurface(paths.filter((p) => !IGNORE_HARD.test(p)));
   const matched = surface.filter((p) => !IGNORE_SOFT.test(p));
   const softSkipped = surface.filter((p) => IGNORE_SOFT.test(p));
   const capped = matched.slice(0, MAX_SURFACE_FILES);
@@ -340,15 +352,17 @@ export function readLocalTree(dir: string): RepoTree {
   // Always include the fixed ROOT surface files first (never scan LESS than the old
   // baseline), THEN recurse for NESTED ones (1c-B). The caps bound only the recursive walk.
   for (const p of SURFACE_FILES) collect(p);
-  // Recurse for agent-surface files at any depth (bounded, skip dep/build dirs), the local
-  // twin of the Trees-API discovery. POSIX-separator rel paths so SURFACE_BASENAME /
-  // isIgnoredDir match identically to the GitHub side. Symlinked dirs are skipped (Dirent
-  // .isDirectory() is false for a symlink) so there is no symlink-loop risk.
-  const matches: string[] = [];
+  // Walk the tree (bounded, skip dep/build dirs), then choose with the same selectSurface
+  // the Trees API path and the git-ref reader use. It has to see the whole listing first: a
+  // skill's supporting file is surface only because of a SKILL.md somewhere above it, which
+  // a per-file test during the walk cannot know. POSIX-separator rel paths so the selector
+  // and isIgnoredDir match identically to the GitHub side. Symlinked dirs are skipped
+  // (Dirent .isDirectory() is false for a symlink) so there is no symlink-loop risk.
+  const all: string[] = [];
   const MAX_DIRS = 5000; // dir-visit budget so a huge tree can't turn a scan into a full crawl
   let dirsVisited = 0;
   const walk = (relDir: string) => {
-    if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS) return;
+    if (dirsVisited >= MAX_DIRS) return;
     dirsVisited++;
     let entries: fs.Dirent[];
     try {
@@ -357,22 +371,23 @@ export function readLocalTree(dir: string): RepoTree {
       return; // unreadable dir → skip
     }
     for (const e of entries) {
-      if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS) return;
+      if (dirsVisited >= MAX_DIRS) return;
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) {
         if (isIgnoredDir(`${rel}/`)) continue;
         walk(rel);
-      } else if (e.isFile() && SURFACE_BASENAME.test(rel)) {
-        matches.push(rel);
+      } else if (e.isFile()) {
+        all.push(rel);
       }
     }
   };
   walk('');
-  if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS)
+  const matches = selectSurface(all);
+  if (matches.length > MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS)
     notes.push(
       `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files / ${MAX_DIRS} dirs).`
     );
-  for (const rel of matches) collect(rel);
+  for (const rel of matches.slice(0, MAX_SURFACE_FILES)) collect(rel);
   const wfDir = path.join(root, WORKFLOW_DIR);
   try {
     if (fs.existsSync(wfDir)) {
@@ -438,7 +453,7 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
   // Same order as readLocalTree: the fixed root surface first (never scan LESS than the
   // old baseline), then nested matches, then root workflows.
   for (const rel of SURFACE_FILES) add(rel);
-  const nested = all.filter((rel) => SURFACE_BASENAME.test(rel) && !isIgnoredDir(rel));
+  const nested = selectSurface(all.filter((rel) => !isIgnoredDir(rel)));
   if (nested.length > MAX_SURFACE_FILES) {
     notes.push(
       `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files).`
