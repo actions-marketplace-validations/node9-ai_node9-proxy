@@ -421,6 +421,20 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
   );
 }
 
+/** claude-code-action bypasses its write-permission gate only when the SAME step also passes
+ *  its own `github_token`: action.yml wires `inputs.github_token` to OVERRIDE_GITHUB_TOKEN, and
+ *  permissions.ts checks `allowedNonWriteUsers && githubTokenProvided` (present since the input
+ *  was added, #550, 2025-09-07). `"*"` alone leaves the default write gate ON. Measured against
+ *  live workflows 2026-09-24: 4 of 114 medium "gate-off" findings had `"*"` and no token, and
+ *  were really gated. A step may also set the env var the action reads directly. */
+function bypassArmed(steps: Step[]): boolean {
+  return steps.some(
+    (s) =>
+      str(s.with?.['allowed_non_write_users']) === '*' &&
+      (!!str(s.with?.['github_token']) || !!str(s.env?.['OVERRIDE_GITHUB_TOKEN']))
+  );
+}
+
 /** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
  *  `claude-code-base-action`) runs the agent ONLY for users with WRITE access by
  *  default. `allowed_non_write_users: "*"` removes that gate; anything else keeps
@@ -446,7 +460,7 @@ function injectableJobs(
   for (const job of jobList(wf)) {
     const a = (job.steps ?? []).filter(isAgentStep);
     if (!a.length) continue;
-    const jobStar = str(a.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
+    const jobStar = bypassArmed(a);
     if (jobActorGate(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger))
       continue;
     out.push(job);
@@ -574,7 +588,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   } = triggerReach(wf, raw);
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
-  const nonWriteStar = nonWrite === '*';
+  const nonWriteStar = bypassArmed(agentSteps);
+  // "*" written but no github_token on that step: the action ignores it and keeps its gate.
+  const starWithoutToken = nonWrite === '*' && !nonWriteStar;
   const nonWriteList = !!nonWrite && nonWrite !== '*';
 
   // reusable (workflow_call) is scored as potentially-untrusted — its caller may wire an
@@ -741,7 +757,8 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
         : 'agent has broad/write-capable tool grants'
     );
   }
-  if (bypassActive) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
+  if (bypassActive)
+    signals.push('allowed_non_write_users: "*" with github_token — any user can trigger the agent');
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
   if (!gate && reach > 0) signals.push('no effective actor gate');
@@ -765,6 +782,10 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
   if (pinned) mitigations.push('agent action pinned to a commit SHA');
   if (nonWriteList) mitigations.push('non-write users scoped to a list, not "*"');
+  if (starWithoutToken)
+    mitigations.push(
+      'allowed_non_write_users: "*" is set without github_token, so the action keeps its default write gate'
+    );
 
   const title =
     severity === 'critical' || severity === 'high'
@@ -886,9 +907,7 @@ function evalAgentJob(
   const secrets = agentReachableSecrets(wf, jobAgentSteps, [job]);
   if (secrets.length === 0) return null;
 
-  const nonWriteStar =
-    str(jobAgentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
-  const bypassActive = nonWriteStar && untrustedTrigger;
+  const bypassActive = bypassArmed(jobAgentSteps) && untrustedTrigger;
   const head = untrustedHeadCheckout(jobSteps);
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,

@@ -16,5 +16,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
