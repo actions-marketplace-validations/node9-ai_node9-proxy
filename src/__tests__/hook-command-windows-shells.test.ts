@@ -26,7 +26,7 @@
  * the thing they were written for.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -55,6 +55,23 @@ function toForwardSlashes(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
+// Stands in for cli.js. It drains stdin and exits 0 on EOF, and it also exits 0
+// after a short fallback, because EOF is not guaranteed to reach it: under
+// `powershell -Command` the shell and the child node process share the piped
+// stdin, and when powershell reads it first the child waits for an EOF that
+// never comes. That race hung the powershell case until vitest's 30s timeout
+// on one Windows CI run (PR #364) and passed on the rerun. The question under
+// test is whether the shell can LAUNCH the command; a zero exit from this
+// script already proves that, however it got there. The pre-fix form still
+// fails, because it never gets as far as running this script.
+const STUB_SOURCE =
+  'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));' +
+  'setTimeout(()=>process.exit(0),1000);\n';
+
+// Well under vitest's 30s test timeout, so a hung shell fails the test with a
+// null exit status that names the runner, instead of a bare test timeout.
+const RUN_TIMEOUT_MS = 20_000;
+
 // Each runner form, invoked the way an agent harness spawns a hook: the whole
 // command as one verbatim string, with a JSON payload on stdin.
 const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
@@ -65,6 +82,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         input: '{"hook_event_name":"PreToolUse"}',
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
+        timeout: RUN_TIMEOUT_MS,
       }).status,
   },
   {
@@ -74,6 +92,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         input: '{"hook_event_name":"PreToolUse"}',
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
+        timeout: RUN_TIMEOUT_MS,
       }).status,
   },
   {
@@ -90,6 +109,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         input: '{"hook_event_name":"PreToolUse"}',
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
+        timeout: RUN_TIMEOUT_MS,
       }).status,
   },
 ];
@@ -104,12 +124,7 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
     vi.stubEnv('NODE9_TESTING', '');
     dirWithSpace = fs.mkdtempSync(path.join(os.tmpdir(), 'node9 hook '));
     stubScript = path.join(dirWithSpace, 'cli.js');
-    // Stands in for cli.js: drains stdin and exits 0. The question under test
-    // is whether the shell can LAUNCH the command, not what node9 decides.
-    fs.writeFileSync(
-      stubScript,
-      'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));\n'
-    );
+    fs.writeFileSync(stubScript, STUB_SOURCE);
     restore = stubProcess(process.execPath, stubScript);
   });
 
@@ -144,5 +159,31 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
     // a command), and pinning a second mechanism to the same assertion would
     // make a future failure ambiguous.
     expect(RUNNERS[0].run(broken)).not.toBe(0);
+  });
+});
+
+// Runs on every platform: the stub must exit 0 even when stdin is never
+// closed, which is the condition that hung the powershell case on Windows.
+// The pipe below is held open on purpose and only closed after the child has
+// exited. With the old EOF-only stub the child never exits on its own and the
+// guard kills it, so the assertion sees a signal instead of exit code 0.
+describe('Windows shell test stub', () => {
+  it('exits 0 even when stdin never reaches EOF', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-stub-'));
+    try {
+      const script = path.join(dir, 'cli.js');
+      fs.writeFileSync(script, STUB_SOURCE);
+      const child = spawn(process.execPath, [script], { stdio: ['pipe', 'ignore', 'ignore'] });
+      child.stdin.write('{"hook_event_name":"PreToolUse"}');
+      const guard = setTimeout(() => child.kill(), 5_000);
+      const code = await new Promise<number | null>((resolve) =>
+        child.on('exit', (c) => resolve(c))
+      );
+      clearTimeout(guard);
+      child.stdin.destroy();
+      expect(code).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
